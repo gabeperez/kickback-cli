@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kickback — terminal companion for Kickbacks.ai</title>
+<meta name="description" content="See your Kickbacks.ai status, live earnings, and ad history in the terminal. Local-first, safe by default, fully transparent.">
+<style>
+  :root{
+    --bg:#0b0d10; --panel:#13171c; --line:#232a33; --fg:#e6edf3; --mut:#8b96a5;
+    --grn:#3fb950; --acc:#58a6ff; --warn:#d29922; --code:#0d1117;
+  }
+  *{box-sizing:border-box} html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .wrap{max-width:780px;margin:0 auto;padding:0 20px}
+  header{padding:64px 0 28px;text-align:center}
+  h1{font-size:44px;margin:0 0 6px;letter-spacing:-.02em}
+  h1 .dot{color:var(--grn)}
+  .tag{color:var(--mut);font-size:18px;margin:0 auto;max-width:560px}
+  .blessed{display:inline-block;margin-top:16px;padding:5px 12px;border:1px solid var(--line);
+    border-radius:999px;background:var(--panel);color:var(--mut);font-size:13px}
+  .blessed b{color:var(--grn)}
+  h2{font-size:22px;margin:44px 0 14px;letter-spacing:-.01em}
+  h3{font-size:15px;margin:22px 0 8px;color:var(--mut);text-transform:uppercase;letter-spacing:.06em}
+  p{color:#c4cdd8}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:14px 0}
+  pre,code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .cmd{position:relative;background:var(--code);border:1px solid var(--line);border-radius:10px;
+    padding:14px 52px 14px 16px;overflow-x:auto;font-size:14px;color:#e6edf3;margin:8px 0}
+  .cmd .p{color:var(--grn)}
+  .copy{position:absolute;top:8px;right:8px;background:#1b222b;border:1px solid var(--line);color:var(--mut);
+    border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer}
+  .copy:hover{color:var(--fg)}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  @media(max-width:620px){.grid{grid-template-columns:1fr}}
+  .item{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .item b{display:block;margin-bottom:2px}
+  .item.good b{color:var(--grn)} .item.never b{color:#ff7b72} .item.warn b{color:var(--warn)}
+  .item small{color:var(--mut);font-size:13px}
+  ul{padding-left:18px;color:#c4cdd8} li{margin:5px 0}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
+  th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--mut);font-weight:600}
+  .off{color:var(--mut)} .on{color:var(--grn)} .risk{color:var(--warn)}
+  a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
+  footer{color:var(--mut);font-size:13px;text-align:center;padding:48px 0 64px;border-top:1px solid var(--line);margin-top:48px}
+  .links{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>kickback<span class="dot">.</span></h1>
+    <p class="tag">See your Kickbacks.ai status, live earnings, and ad history right in your terminal — local-first, safe by default, nothing hidden.</p>
+    <div class="blessed">Built with the <b>blessing of the Kickbacks.ai maker</b> · independent companion tool</div>
+  </header>
+
+  <video autoplay loop muted playsinline poster="kickback-poster.png"
+         style="width:100%;border:1px solid var(--line);border-radius:12px;display:block">
+    <source src="kickback-demo.mp4" type="video/mp4">
+    <img src="kickback-demo.gif" alt="kickback terminal demo" style="width:100%">
+  </video>
+
+  <h2>Install</h2>
+  <p>macOS, needs <code>python3</code> + <code>openssl</code> (both ship with macOS). No pip packages.</p>
+
+  <h3>One-line install</h3>
+  <div class="cmd"><span class="p">curl</span> -fsSL https://gabeperez.github.io/kickback-cli/install.sh | bash
+    <button class="copy" data-cmd="curl -fsSL https://gabeperez.github.io/kickback-cli/install.sh | bash">copy</button></div>
+
+  <h3>Or with Homebrew</h3>
+  <div class="cmd"><span class="p">brew</span> install gabeperez/kickback/kickback
+    <button class="copy" data-cmd="brew install gabeperez/kickback/kickback">copy</button></div>
+
+  <p style="color:var(--mut);font-size:14px">It installs one script and writes a config with safe defaults. Inspect first if you like — that's encouraged: <a href="/kickback">view the exact script</a>.</p>
+
+  <h2>What it does — and what it touches</h2>
+  <p>Run <code>kickback about</code> any time for this, generated from the tool itself.</p>
+
+  <h3>Reads — all local, all yours</h3>
+  <div class="grid">
+    <div class="item"><b>The extension's files</b><small>cli-ad.json / debug.log — the current ad &amp; status it already wrote to your disk</small></div>
+    <div class="item"><b>~/.claude/settings.json</b><small>to confirm the spinner &amp; status line are wired up</small></div>
+    <div class="item"><b>Your editor's local DB</b><small>to read <i>your</i> Kickbacks access token (state.vscdb)</small></div>
+    <div class="item"><b>Your macOS Keychain</b><small>the key that decrypts that token — the same one your editor uses</small></div>
+  </div>
+
+  <h3>Sends over the network</h3>
+  <div class="panel">
+    <b style="color:var(--grn)">Only your own token + the Claude Code version → Kickbacks' own backend.</b>
+    <p style="margin:8px 0 0">The exact same server the official extension already talks to. Nothing is ever sent to the tool's author or any third party.</p>
+  </div>
+
+  <h3>Never does</h3>
+  <div class="grid">
+    <div class="item never"><b>✗ read your code</b><small>prompts and completions are never touched</small></div>
+    <div class="item never"><b>✗ move money or click ads</b><small>read-only on your earnings</small></div>
+    <div class="item never"><b>✗ bake in your account</b><small>account, paths, device — all discovered at runtime, nothing hardcoded</small></div>
+    <div class="item never"><b>✗ phone home</b><small>no analytics, no telemetry to anyone but Kickbacks</small></div>
+  </div>
+
+  <h2>Safe by default</h2>
+  <p>Every feature that <i>writes</i> anything is <b>off</b> until you turn it on. Read-only status needs nothing.</p>
+  <table>
+    <tr><th>Feature</th><th>Default</th><th>What it does</th></tr>
+    <tr><td>network</td><td class="on">on</td><td>contact the Kickbacks backend for earnings (turn off for fully-offline status)</td></tr>
+    <tr><td>sampler</td><td class="off">off</td><td>60s background job logging ad rotations &amp; earnings → history / daily charts</td></tr>
+    <tr><td>notifications</td><td class="off">off</td><td>daily macOS notification with your earnings</td></tr>
+    <tr><td>token_refresh</td><td class="risk">off ⚠</td><td>when the editor is <i>closed</i>, refresh an expiring token &amp; write it back (backup saved first)</td></tr>
+  </table>
+  <div class="cmd"><span class="p">kickback</span> config        <span style="color:var(--mut)"># see toggles · enable/disable &lt;feature&gt;</span>
+    <button class="copy" data-cmd="kickback config">copy</button></div>
+  <p style="color:var(--mut);font-size:14px">Everything is editable by hand in <code>~/.config/kickback/config.json</code> — including the backend URL and keychain names. Nothing is hardcoded.</p>
+
+  <h2>What could change or break it</h2>
+  <p>It's a companion to an extension that updates, so it <b>degrades gracefully</b> — earnings just show "unavailable", on-disk status keeps working, and it never crashes.</p>
+  <table>
+    <tr><th>Change</th><th>What you'd see</th></tr>
+    <tr><td>Extension changes the token format</td><td><code>earned — unavailable</code></td></tr>
+    <tr><td>Backend URL / endpoint changes</td><td><code>HTTP 4xx/5xx</code> — edit config</td></tr>
+    <tr><td>Keychain scheme changes</td><td><code>keychain denied</code></td></tr>
+    <tr><td>Signed out / token expired, editor closed</td><td><code>unavailable</code> until you reopen it</td></tr>
+  </table>
+  <p style="color:var(--mut);font-size:14px"><code>kickback doctor</code> checks all of these live.</p>
+
+  <h2>Earnings accuracy — honest notes</h2>
+  <p>The backend exposes <b>only aggregate earnings</b> (lifetime / today) — never CPM, advertiser cost, or billed impression counts. So per-ad dollars, effective rate, and per-day totals are <b>derived</b> by attributing earnings changes to whichever ad was showing. They're approximate and represent <i>your share</i>, not advertiser spend — and they're labeled that way everywhere in the tool.</p>
+
+  <footer>
+    Independent companion tool, built with the maker's blessing. Not operated by Kickbacks.ai.
+    <div class="links">
+      <a href="/kickback">View source</a>
+      <a href="https://github.com/gabeperez/kickback-cli">GitHub</a>
+      <a href="https://kickbacks.ai">Kickbacks.ai</a>
+    </div>
+  </footer>
+
+</div>
+<script>
+  document.querySelectorAll(".copy").forEach(function(b){
+    b.addEventListener("click", function(){
+      navigator.clipboard.writeText(b.getAttribute("data-cmd"));
+      var t=b.textContent; b.textContent="copied!"; setTimeout(function(){b.textContent=t;},1200);
+    });
+  });
+</script>
+</body>
+</html>

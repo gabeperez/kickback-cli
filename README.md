@@ -1,0 +1,168 @@
+# kickback
+
+A small, local terminal companion for the [Kickbacks.ai](https://kickbacks.ai) VS Code / Cursor extension — see your **status, live earnings, ad history, and derived economics** without opening the editor.
+
+![platform](https://img.shields.io/badge/platform-macOS-black) ![deps](https://img.shields.io/badge/deps-python3%20%2B%20openssl-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+
+> Independent companion tool, built with the blessing of the Kickbacks.ai maker. Not operated by Kickbacks.
+
+![kickback demo](media/kickback-demo.gif)
+
+---
+
+## Requirements
+
+- **macOS** (reads the macOS Keychain + your editor's local store)
+- `python3` and `openssl` — both ship with macOS. **No pip packages, no build step.**
+- The [Kickbacks.ai extension](https://marketplace.visualstudio.com/items?itemName=Kickbacksai.kickbacks-ai) installed and signed in (in VS Code or Cursor)
+
+## Install
+
+```bash
+# one-line
+curl -fsSL https://gabeperez.github.io/kickback-cli/install.sh | bash
+
+# or Homebrew
+brew install gabeperez/kickback/kickback
+
+# or from source
+git clone https://github.com/gabeperez/kickback-cli && cd kickback-cli && ./install.sh
+```
+
+It copies one script to `~/.local/bin/kickback` and writes a config with **safe defaults** (everything that writes anything is off until you opt in).
+
+## Quickstart
+
+```bash
+kickback            # status + live earnings + current ad
+kickback about      # exactly what it reads, sends, and never does
+kickback doctor     # live health check
+```
+
+## What it does — and what it touches
+
+Run `kickback about` any time for the full, plain-English version. In short:
+
+**Reads (all local, all yours):**
+- the extension's own files (`~/.vibe-ads/cli-ad.json`, `debug.log`) — current ad + status
+- `~/.claude/settings.json` — to confirm the spinner/statusline are wired
+- your editor's local `state.vscdb` — to read **your** Kickbacks access token
+- your macOS Keychain — the key that decrypts that token (the same one the editor uses)
+
+**Sends over the network:** only when `network` is on — **your own token + the Claude Code version**, to **Kickbacks' own backend** (the same server the official extension uses). Nothing goes to the author or any third party.
+
+**Never:** reads your code/prompts/completions, moves money, clicks ads, or bakes in your account/paths/device — everything is discovered at runtime.
+
+## Safe by default
+
+Every feature that *writes* anything is **off** until you enable it:
+
+| Feature | Default | What it does |
+|---|---|---|
+| `network` | **on** | contact the Kickbacks backend for earnings (turn off for fully-offline status) |
+| `sampler` | off | 60s background job logging ad rotations + earnings → history/daily charts |
+| `notifications` | off | daily macOS notification with your earnings |
+| `token_refresh` | off | ⚠ when the editor is **closed**, refresh an expiring token and write it back (a backup is saved first) |
+
+```bash
+kickback config                 # see all toggles
+kickback enable sampler         # opt in (installs the background job)
+kickback disable notifications  # opt out (removes it)
+```
+
+## Commands
+
+| Command | What it shows / does |
+|---|---|
+| `kickback` | status + live earnings + current ad |
+| `kickback earnings` | lifetime/today, velocity, derived per-rotation rate, attribution % |
+| `kickback history` (`ads`) | ads seen, counts, derived $ per ad |
+| `kickback daily` (`chart`) | per-day earnings sparkline |
+| `kickback auth` | per-editor token: account + expiry |
+| `kickback watch [secs]` | live auto-refreshing view (default 5s) |
+| `kickback notify` | fire a macOS notification with today's earnings |
+| `kickback about` | what it reads/sends + what could break |
+| `kickback doctor` | live diagnostics |
+| `kickback config` | show settings + feature toggles |
+| `kickback enable` / `disable <feature>` | `network` · `sampler` · `notifications` · `token_refresh` |
+| `kickback refresh [--force]` | mint a fresh token (needs `token_refresh`; editor closed) |
+| `kickback install-alias` | add a `kb` shortcut to `~/.zshrc` |
+| `kickback --version` · `help` | version / usage |
+
+Global flags: `--json` · `--plain` (no color) · `--offline` (no keychain/network) · `--no-log`.
+
+## Configuration
+
+Everything lives in `~/.config/kickback/config.json` and is editable by hand — **nothing is hardcoded**:
+
+| Key | Purpose |
+|---|---|
+| `network_enabled` | master switch for backend calls |
+| `features.{sampler,notifications,token_refresh}` | feature toggles |
+| `backend_base_url`, `endpoints` | where earnings come from (edit if Kickbacks changes them) |
+| `editors[]` | keychain service + `state.vscdb` path + process name per editor (VS Code, Cursor) |
+| `vibe_ads_dir`, `claude_settings` | where the extension wrote its files |
+| `notify_hour` | hour (0–23) for the daily notification |
+
+## What could change or break it
+
+It's a companion to an extension that updates, so it **degrades gracefully** — earnings just show "unavailable", on-disk status keeps working, and it never crashes:
+
+| Change | Symptom | Fix |
+|---|---|---|
+| Extension changes the token format/keys | `earned — unavailable` | update the decode (see `kickback doctor`) |
+| Backend URL/endpoint changes | `HTTP 4xx/5xx` | edit `backend_base_url` in config |
+| Keychain scheme changes | `keychain denied` | re-check the service name in config |
+| Signed out / token expired, editor closed | `unavailable` until you reopen the editor | (or enable `token_refresh`) |
+
+`kickback doctor` checks all of these live.
+
+## Earnings accuracy (honest notes)
+
+The backend exposes **only aggregate earnings** (lifetime/today) — never CPM, advertiser cost, per-click value, or billed impression counts. So:
+- **Per-ad `$`, effective rate, and per-day totals are *derived*** by attributing earnings deltas to whichever ad was showing. They're approximate and represent *your ~50% share*, not advertiser spend. Labeled as such everywhere.
+
+## FAQ
+
+**Is this safe to run?** It's read-only by default and never sends your data anywhere but Kickbacks' own server (your own token, like the extension does). `kickback about` lists every file it touches.
+
+**Will it get my account banned?** This tool exists with the maker's blessing. The risky writes (`token_refresh`) are opt-in, guarded to when the editor is closed, and back up your tokens first.
+
+**Does it work with Cursor?** Yes — it reads whichever editor (VS Code or Cursor) is signed in, picking the longest-valid token.
+
+**Why are earnings "unavailable"?** Usually the token expired with the editor closed. Open the editor, or enable `token_refresh`. Run `kickback doctor`.
+
+## Make your own demo video
+
+Two reproducible terminal recordings live in `media/`, built with [`agg`](https://github.com/asciinema/agg):
+
+- `make_cast.py` → **feature demo** (`kickback-demo.gif/mp4`) — every command, calmly.
+- `make_promo.py` → **promo cut** (`kickback-promo.gif/mp4`) — text cards + money shots + CTA. Edit the `STORYBOARD` list at the top to retime/reword.
+
+Prefix any render with `KICKBACK_DEMO=1` to use coherent **illustrative sample data** (and touch no real account/token/keychain) — handy for public marketing clips. Real data is the default.
+
+```bash
+brew install agg                       # one-time (also: vhs is NOT needed)
+KICKBACK_DEMO=1 python3 media/make_promo.py    # drop the prefix for your real numbers
+agg --theme dracula --font-size 22 --line-height 1.4 --last-frame-duration 3 \
+    media/kickback-promo.cast media/kickback-promo.gif
+ffmpeg -y -i media/kickback-promo.gif -vsync cfr -r 30 -movflags +faststart \
+    -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" media/kickback-promo.mp4
+```
+
+Both capture the **real** tool output under a PTY, so colors and live numbers are genuine. (Heads-up: `ffmpeg -ss` mis-seeks agg's variable-delay GIFs — open the GIF/MP4 directly to preview.)
+
+## Uninstall
+
+```bash
+kickback disable sampler          # remove the launchd jobs
+kickback disable notifications
+rm ~/.local/bin/kickback
+rm -rf ~/.config/kickback         # config
+# optional history/data:
+rm -f ~/.vibe-ads/ad-history.jsonl ~/.vibe-ads/daily.json
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE).

@@ -1,0 +1,795 @@
+#!/usr/bin/env python3
+"""
+kickback — a local, read-only-by-default companion for the Kickbacks.ai
+VS Code/Cursor extension. Shows your status, live earnings, ad history and
+derived economics in the terminal.
+
+DESIGN PRINCIPLES (see `kickback about`):
+  • Nothing about your device or account is baked in. Every value the tool
+    uses is discovered at runtime ON YOUR MACHINE (keychain, your editor's
+    local DB, your $HOME) or lives in an editable config file you control.
+  • The only thing ever sent over the network is YOUR OWN access token plus
+    the Claude Code version, to Kickbacks' OWN backend — the same server the
+    official extension already talks to. Nothing goes anywhere else.
+  • Safe by default: every feature that writes anything (sampler, notifications,
+    token refresh) is OFF until you turn it on. Read-only status needs nothing.
+
+No third-party Python packages required: crypto uses the `cryptography` module
+if present, otherwise falls back to the system `openssl` (always on macOS).
+"""
+import json, os, re, sys, time, sqlite3, subprocess, hashlib, base64, urllib.request, urllib.error
+
+APP = "kickback"
+VERSION = "0.1.0"
+CONFIG_DIR = os.path.expanduser(os.path.join("~", ".config", APP))
+CFG_PATH = os.path.join(CONFIG_DIR, "config.json")
+SELF = os.path.abspath(__file__)
+ZSHRC = os.path.expanduser("~/.zshrc")
+SAMPLER_LABEL = "ai.kickbacks.sampler"
+NOTIFY_LABEL = "ai.kickbacks.daily"
+FRESH_MS = 600_000
+
+DEFAULT_CONFIG = {
+    "version": 1,
+    "network_enabled": True,        # allow talking to the Kickbacks backend at all
+    "features": {
+        "sampler": False,           # 60s launchd job that logs ad rotations + earnings
+        "notifications": False,     # daily macOS notification with your earnings
+        "token_refresh": False,     # RISKY: mint+persist a fresh token when editor is closed
+    },
+    "notify_hour": 21,
+    "backend_base_url": "https://kickbacks-backend-gmdaqm2c7q-uw.a.run.app",
+    "endpoints": {"earnings": "/v1/earnings", "portfolio": "/v1/portfolio", "refresh": "/v1/auth/refresh"},
+    "vibe_ads_dir": "~/.vibe-ads",            # where the extension writes cli-ad.json / debug.log
+    "claude_settings": "~/.claude/settings.json",
+    "editors": [
+        {"name": "Code", "keychain_service": "Code Safe Storage",
+         "state_db": "~/Library/Application Support/Code/User/globalStorage/state.vscdb",
+         "process_match": "Visual Studio Code.app"},
+        {"name": "Cursor", "keychain_service": "Cursor Safe Storage",
+         "state_db": "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
+         "process_match": "Cursor.app"},
+    ],
+}
+
+# ---------- args / color --------------------------------------------------
+ARGS = sys.argv[1:]
+def flag(n): return n in ARGS
+def positional(i, default=None):
+    pos = [a for a in ARGS if not a.startswith("-")]
+    return pos[i] if len(pos) > i else default
+NO_COLOR = flag("--plain") or not sys.stdout.isatty() or os.environ.get("NO_COLOR")
+def c(code, s): return s if NO_COLOR else f"\033[{code}m{s}\033[0m"
+DIM=lambda s:c("2",s); BOLD=lambda s:c("1",s); GREEN=lambda s:c("32",s)
+RED=lambda s:c("31",s); YELLOW=lambda s:c("33",s); CYAN=lambda s:c("36",s)
+def expand(p): return os.path.expanduser(p) if isinstance(p, str) else p
+
+# ---------- config --------------------------------------------------------
+def _detect_initial_features():
+    la = os.path.expanduser("~/Library/LaunchAgents")
+    return {
+        "sampler": os.path.exists(os.path.join(la, SAMPLER_LABEL+".plist")),
+        "notifications": os.path.exists(os.path.join(la, NOTIFY_LABEL+".plist")),
+        "token_refresh": False,
+    }
+
+def _deep_merge(base, over):
+    out = dict(base)
+    for k, v in (over or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+_CFG = None
+def cfg():
+    global _CFG
+    if _CFG is not None: return _CFG
+    if os.path.exists(CFG_PATH):
+        try:
+            _CFG = _deep_merge(DEFAULT_CONFIG, json.load(open(CFG_PATH)))
+        except Exception:
+            _CFG = dict(DEFAULT_CONFIG)
+    else:
+        # first run: create config, reflecting any launchd jobs already present
+        _CFG = dict(DEFAULT_CONFIG)
+        _CFG["features"] = _detect_initial_features()
+        save_cfg(_CFG)
+    return _CFG
+
+def save_cfg(co):
+    global _CFG
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CFG_PATH, "w") as f: json.dump(co, f, indent=2)
+    _CFG = co
+
+def feature(name): return bool(cfg().get("features", {}).get(name))
+def VA(): return expand(cfg()["vibe_ads_dir"])
+def path_ad(): return os.path.join(VA(), "cli-ad.json")
+def path_log(): return os.path.join(VA(), "debug.log")
+def path_hist(): return os.path.join(VA(), "ad-history.jsonl")
+def path_daily(): return os.path.join(VA(), "daily.json")
+def BACKEND(): return cfg()["backend_base_url"]
+def ep(k): return cfg()["endpoints"][k]
+
+# ---------- crypto (cryptography OR openssl) ------------------------------
+def _aes_cbc(data, key, decrypt):
+    iv = b" " * 16
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.backends import default_backend
+        ctx = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+        op = ctx.decryptor() if decrypt else ctx.encryptor()
+        return op.update(data) + op.finalize()
+    except ImportError:
+        mode = "-d" if decrypt else "-e"
+        r = subprocess.run(["openssl", "enc", "-aes-128-cbc", mode, "-nopad",
+                            "-K", key.hex(), "-iv", iv.hex()],
+                           input=data, capture_output=True)
+        if r.returncode != 0:
+            raise RuntimeError("openssl: " + r.stderr.decode()[:120])
+        return r.stdout
+
+def _key(svc):
+    pw = subprocess.check_output(["security", "find-generic-password", "-s", svc, "-w"],
+                                 stderr=subprocess.DEVNULL).strip()
+    return hashlib.pbkdf2_hmac("sha1", pw, b"saltysalt", 1003, 16)
+def _dec(buf, k):
+    pt = _aes_cbc(bytes(buf)[3:], k, True)
+    return pt[:-pt[-1]]
+def _enc(s, k):
+    data = s.encode() if isinstance(s, str) else s
+    pad = 16 - (len(data) % 16); data += bytes([pad]) * pad
+    return b"v10" + _aes_cbc(data, k, False)
+
+def _read_secret(db, which):
+    db = expand(db)
+    if not os.path.exists(db): return None
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        row = con.execute("SELECT value FROM ItemTable WHERE key LIKE ?",
+                          (f'secret://%kickbacks.{which}%',)).fetchone()
+    finally:
+        con.close()
+    return json.loads(row[0])["data"] if row else None
+def _jwt_claims(tok):
+    try:
+        pl = tok.split(".")[1]; pl += "=" * (-len(pl) % 4)
+        return json.loads(base64.urlsafe_b64decode(pl))
+    except Exception: return {}
+def _running(proc):
+    try: return subprocess.run(["pgrep", "-f", proc], capture_output=True).returncode == 0
+    except Exception: return False
+
+# ---------- editor token sources -----------------------------------------
+def token_sources():
+    if _demo_on(): return [_demo_source()]
+    out = []
+    for ed in cfg()["editors"]:
+        try:
+            buf = _read_secret(ed["state_db"], "access")
+            if not buf: continue
+            k = _key(ed["keychain_service"])
+            tok = _dec(buf, k).decode("utf-8", "replace")
+            cl = _jwt_claims(tok)
+            out.append({"name": ed["name"], "token": tok, "claims": cl,
+                        "exp": cl.get("exp"), "running": _running(ed["process_match"]),
+                        "key": k, "ed": ed})
+        except Exception:
+            continue
+    return out
+
+def best_source():
+    srcs = token_sources()
+    if not srcs: return None, "no signed-in editor found"
+    srcs.sort(key=lambda s: s.get("exp") or 0, reverse=True)
+    best = srcs[0]; now = int(time.time())
+    if feature("token_refresh") and best.get("exp") and best["exp"] - now < 120 and not best["running"]:
+        nt = _do_refresh(best, quiet=True)
+        if nt: best["token"] = nt
+    return best, None
+
+# ---------- backend -------------------------------------------------------
+def _get(path, token):
+    req = urllib.request.Request(BACKEND() + path, headers={"authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=12) as r: return json.loads(r.read())
+def _post(path, body):
+    req = urllib.request.Request(BACKEND() + path, data=json.dumps(body).encode(),
+                                 method="POST", headers={"content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=12) as r: return json.loads(r.read())
+
+def _do_refresh(src, quiet=False):
+    """Only called when token_refresh is enabled AND the editor is closed.
+    Rotates the refresh token server-side, so we back up and persist BOTH new
+    tokens into the editor's store, keeping its sign-in valid."""
+    if not feature("token_refresh"):
+        if not quiet: print("token_refresh is disabled — enable with `kickback enable token_refresh`")
+        return None
+    try:
+        rbuf = _read_secret(src["ed"]["state_db"], "refresh")
+        if not rbuf: return None
+        rt = _dec(rbuf, src["key"]).decode("utf-8", "replace")
+        j = _post(ep("refresh"), {"refresh_token": rt})
+        new_at = j.get("access_token")
+        if not new_at: return None
+        bak = os.path.join(VA(), f"token-backup-{src['name']}-{int(time.time()*1000)}.json")
+        with open(bak, "w") as f:
+            json.dump({"access": _read_secret(src["ed"]["state_db"], "access"), "refresh": rbuf}, f)
+        _store_secret(src, "access", new_at)
+        if j.get("refresh_token"): _store_secret(src, "refresh", j["refresh_token"])
+        if not quiet: print(f"refreshed {src['name']} (backup: {os.path.basename(bak)})")
+        return new_at
+    except Exception as ex:
+        if not quiet: print("refresh failed:", type(ex).__name__)
+        return None
+
+def _store_secret(src, which, token_str):
+    val = json.dumps({"type": "Buffer", "data": list(_enc(token_str, src["key"]))})
+    con = sqlite3.connect(expand(src["ed"]["state_db"]), timeout=5)
+    try:
+        con.execute("UPDATE ItemTable SET value=? WHERE key LIKE ?", (val, f'secret://%kickbacks.{which}%'))
+        con.commit()
+    finally:
+        con.close()
+
+def fetch_live(ccver):
+    """(earnings|None, portfolio|None, err|None, source|None)"""
+    if _demo_on():
+        return _demo_earnings(), _demo_portfolio(), None, _demo_source()
+    if not cfg().get("network_enabled", True):
+        return None, None, "network disabled", None
+    try:
+        src, err = best_source()
+        if not src: return None, None, err, None
+        v = ccver or ""
+        e = _get(f"{ep('earnings')}?claude_code_version={v}", src["token"])
+        p = None
+        try: p = _get(f"{ep('portfolio')}?claude_code_version={v}", src["token"])
+        except Exception: pass
+        return e, p, None, src
+    except urllib.error.HTTPError as ex: return None, None, f"HTTP {ex.code}", None
+    except subprocess.CalledProcessError: return None, None, "keychain denied", None
+    except Exception as ex: return None, None, type(ex).__name__, None
+
+# ---------- on-disk status ------------------------------------------------
+def read_json(p):
+    try:
+        with open(p) as f: return json.load(f)
+    except Exception: return None
+def usd(m):
+    try:
+        v = float(m)/1e6
+        return f"${v:,.2f}" if abs(v) >= 1 else f"${v:.4f}"
+    except Exception: return "$?"
+
+# --- demo mode (KICKBACK_DEMO=1): coherent illustrative data for screenshots /
+#     marketing. Touches no keychain, token, network, or real history. ---------
+def _demo_on(): return bool(os.environ.get("KICKBACK_DEMO"))
+_DEMO_ADS = [
+    ("Sundial — trustworthy AI data engineering + analysis", "https://sundial.ai/"),
+    ("Inflowpay — global sales, 50% less fees, 10% more conversions", "https://inflowpay.com/"),
+    ("Viktor — your AI employee in Slack", "https://heyviktor.com/"),
+    ("AccessGrid — unlock anything with Apple Wallet", "https://accessgrid.com/"),
+    ("here.now — publish your agent for free hosting", "https://here.now/"),
+]
+def _demo_earnings():
+    life = float(os.environ.get("KICKBACK_DEMO_LIFETIME", "312.40"))
+    today = float(os.environ.get("KICKBACK_DEMO_TODAY", "22.00"))
+    return {"lifetime_micros": int(life*1e6), "today_micros": int(today*1e6),
+            "lifetime_usd": f"{life:.2f}", "today_usd": f"{today:.2f}", "cap": None, "blocked": False}
+def _demo_portfolio():
+    a = _DEMO_ADS[0]
+    return {"ads": [{"title_text": a[0], "ad_id": "demo", "campaign_id": "demo-q4",
+                     "weight": 1.0, "click_url": a[1]}],
+            "view_threshold_seconds": 15, "rotation_interval_seconds": 60, "ttl_seconds": 60, "balances": {}}
+def _demo_source():
+    return {"name": "Code", "token": "demo", "claims": {"email": "you@example.com"},
+            "exp": int(time.time()) + 3480, "running": True, "key": b"", "ed": None}
+def _demo_history():
+    rows = []; cur = 240_000000; ts = int(time.time()*1000) - 9*3600*1000
+    for i, inc in enumerate([6, 9, 5, 12, 7, 8, 11, 6, 4, 4]):
+        title = _DEMO_ADS[i % len(_DEMO_ADS)][0]
+        rows.append({"ts": ts + i*3600*1000, "title": title, "url": "",
+                     "micros": cur, "weight": round(0.6 + 0.05*i, 2)})
+        cur += inc*1_000000
+    return rows
+def _demo_daily():
+    d = {}; cum = 0
+    for i, v in enumerate([18, 24, 29, 31, 42, 38, 35, 40, 33, 22]):
+        day = time.strftime("%Y-%m-%d", time.localtime(time.time() - (9 - i)*86400))
+        d[day] = {"life_min": cum*1_000000, "life_max": (cum+v)*1_000000,
+                  "today_max": v*1_000000, "first": 0, "last": 0}
+        cum += v
+    return d
+def _demo_status():
+    a = _DEMO_ADS[0]
+    return {"verdict": "active", "_vc": GREEN, "health": "ok", "cc_version": "2.1.177",
+            "ad_text": a[0], "ad_url": a[1], "ad_age": 41.0, "ad_fresh": True,
+            "spinner_on": True, "statusline_on": True}
+
+def last_session_state():
+    state, last = {}, ""
+    try:
+        with open(path_log(), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if not line: continue
+                last = line
+                if "session.state" in line:
+                    m = re.search(r"session\.state\s+(\{.*\})", line)
+                    if m:
+                        try: state = json.loads(m.group(1))
+                        except Exception: pass
+    except FileNotFoundError: pass
+    return state, last
+
+def gather():
+    if _demo_on(): return _demo_status()
+    state, _ = last_session_state()
+    ad = read_json(path_ad()) or {}
+    st = read_json(expand(cfg()["claude_settings"])) or {}
+    age = (time.time()*1000 - ad["ts"])/1000.0 if isinstance(ad.get("ts"), (int, float)) else None
+    sv = st.get("spinnerVerbs") or {}; sl = st.get("statusLine") or {}
+    signed = state.get("signedIn")
+    if signed is False: v, vc = "sign-in needed", RED
+    elif state.get("killed"): v, vc = "killed", RED
+    elif signed and state.get("injectionOn") and state.get("authHealthy") == "ok": v, vc = "active", GREEN
+    elif signed and not state.get("injectionOn"): v, vc = "idle / off", YELLOW
+    elif signed: v, vc = "signed in", YELLOW
+    else: v, vc = "unknown", YELLOW
+    return {"verdict": v, "_vc": vc, "health": state.get("authHealthy"),
+            "cc_version": state.get("ccVersion"), "ad_text": ad.get("adText"),
+            "ad_url": ad.get("clickUrl"), "ad_age": age,
+            "ad_fresh": age is not None and age <= FRESH_MS/1000.0,
+            "spinner_on": bool(sv.get("verbs")),
+            "statusline_on": "vibe-ads-statusline" in (sl.get("command") or "")}
+
+# ---------- history + daily -----------------------------------------------
+def read_hist():
+    if _demo_on(): return _demo_history()
+    rows = []
+    try:
+        with open(path_hist()) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try: rows.append(json.loads(line))
+                    except Exception: pass
+    except FileNotFoundError: pass
+    return rows
+
+def update_daily(e):
+    if not e or e.get("lifetime_micros") is None: return
+    life = e["lifetime_micros"]; today = e.get("today_micros") or 0
+    d = read_json(path_daily()) or {}
+    key = time.strftime("%Y-%m-%d", time.localtime())
+    rec = d.get(key) or {"life_min": life, "life_max": life, "today_max": today,
+                         "first": int(time.time()*1000), "last": int(time.time()*1000)}
+    rec["life_min"] = min(rec["life_min"], life); rec["life_max"] = max(rec["life_max"], life)
+    rec["today_max"] = max(rec.get("today_max", 0), today); rec["last"] = int(time.time()*1000)
+    d[key] = rec
+    with open(path_daily(), "w") as f: json.dump(d, f)
+def day_earned(rec): return max(rec.get("today_max", 0), rec.get("life_max", 0) - rec.get("life_min", 0))
+
+def log_ad(quiet=False):
+    if _demo_on(): return                      # never write logs in demo mode
+    ad = read_json(path_ad()) or {}; title = ad.get("adText")
+    if not title:
+        if not quiet: print("no current ad to log")
+        return
+    rows = read_hist()
+    rec = {"ts": int(time.time()*1000), "title": title, "url": ad.get("clickUrl") or ""}
+    state, _ = last_session_state()
+    e, p, _err, _src = fetch_live(state.get("ccVersion"))
+    if e: rec["micros"] = e.get("lifetime_micros")
+    if p:
+        for a in (p.get("ads") or []):
+            if a.get("title_text") == title:
+                rec["ad_id"] = a.get("ad_id"); rec["campaign_id"] = a.get("campaign_id"); rec["weight"] = a.get("weight"); break
+    update_daily(e)
+    last_title = rows[-1].get("title") if rows else None
+    if title == last_title:
+        if rec.get("micros") is not None and rec["micros"] != rows[-1].get("micros"):
+            with open(path_hist(), "a") as f: f.write(json.dumps(rec)+"\n")
+            if not quiet: print("micros datapoint added")
+        elif not quiet: print("unchanged — not logged")
+        return
+    with open(path_hist(), "a") as f: f.write(json.dumps(rec)+"\n")
+    if not quiet: print("logged:", title[:55], "·", usd(rec.get("micros")) if rec.get("micros") is not None else "no $")
+
+def attribute(rows):
+    per = {}; pts = [(r["ts"], r["micros"], r.get("title")) for r in rows if isinstance(r.get("micros"), (int, float))]
+    for i in range(len(pts)-1):
+        d = pts[i+1][1] - pts[i][1]
+        if d > 0: per[pts[i][2]] = per.get(pts[i][2], 0) + d
+    return per, pts
+
+SPARK = "▁▂▃▄▅▆▇█"
+def sparkline(vals):
+    if not vals: return ""
+    lo, hi = min(vals), max(vals)
+    if hi <= lo: return SPARK[0]*len(vals)
+    return "".join(SPARK[min(7, int((v-lo)/(hi-lo)*7+0.5))] for v in vals)
+def when(ms): return time.strftime("%b %d %H:%M", time.localtime(ms/1000))
+
+# ---------- views ---------------------------------------------------------
+def show_history():
+    rows = read_hist()
+    if not rows: print("No ad history yet. Enable the sampler: `kickback enable sampler`."); return
+    per, _ = attribute(rows); agg = {}
+    for r in rows:
+        t = r.get("title", "?"); a = agg.setdefault(t, {"count": 0, "first": r["ts"], "last": r["ts"], "weight": r.get("weight")})
+        a["count"] += 1; a["first"] = min(a["first"], r["ts"]); a["last"] = max(a["last"], r["ts"])
+    has = any(per.values())
+    print(" "+BOLD("Kickbacks — ads seen")+DIM(f"   ({len(agg)} distinct · {len(rows)} samples)"))
+    print(" "+DIM("─"*66))
+    for t, a in sorted(agg.items(), key=lambda kv: per.get(kv[0], 0) if has else kv[1]["count"], reverse=True):
+        money = "  "+GREEN(usd(per[t])) if per.get(t) else ""
+        w = DIM(f"  w={a['weight']}") if a.get("weight") is not None else ""
+        print(f"  {BOLD(str(a['count']).rjust(4))}×{money}  {t[:46]}{w}")
+        print(f"        {DIM(when(a['first'])+'  →  '+when(a['last']))}")
+    print(" "+DIM("─"*66))
+    print(DIM("  count = sampled rotations · $ = derived ~50% share (approx, not billed)"))
+
+def show_daily():
+    d = _demo_daily() if _demo_on() else (read_json(path_daily()) or {})
+    if not d: print("No daily history yet — accrues once the sampler runs across a day (`kickback enable sampler`)."); return
+    keys = sorted(d.keys()); vals = [day_earned(d[k]) for k in keys]
+    print(" "+BOLD("Kickbacks — daily earnings")); print(" "+DIM("─"*52))
+    if len(vals) > 1: print("  "+CYAN(sparkline(vals))+DIM(f"   {keys[0]} → {keys[-1]}"))
+    mx = max(vals) or 1
+    for k in keys[-14:]:
+        bar = "█"*min(30, int(day_earned(d[k])/mx*30))
+        print(f"  {k}  {GREEN(usd(day_earned(d[k])).rjust(9))}  {DIM(bar)}")
+    print(" "+DIM("─"*52))
+    print(f"  total observed: {GREEN(usd(sum(vals)))}"+DIM("  (per-day = max(today, lifetime Δ); backend keeps no daily record)"))
+
+def show_auth():
+    srcs = token_sources()
+    if not srcs: print("No signed-in editor found (VS Code / Cursor)."); return
+    now = int(time.time())
+    print(" "+BOLD("Kickbacks — auth")); print(" "+DIM("─"*52))
+    for s in srcs:
+        exp = s.get("exp"); left = f"{(exp-now)/60:.0f}m left" if exp else "?"
+        col = GREEN if (exp and exp > now) else RED
+        print(f"  {BOLD(s['name'].ljust(7))} {col(left.rjust(9))}  {DIM(s['claims'].get('email','?')+' · '+('running' if s['running'] else 'closed'))}")
+    print(" "+DIM("─"*52))
+    rf = "on" if feature("token_refresh") else "off"
+    print(DIM(f"  token_refresh: {rf} — when on, refreshes only while the editor is closed."))
+
+def show_earnings():
+    state, _ = last_session_state()
+    e, p, err, src = fetch_live(state.get("ccVersion"))
+    rows = read_hist()
+    print(" "+BOLD("Kickbacks — earnings")); print(" "+DIM("─"*52))
+    if e:
+        print(f"  lifetime    {GREEN(BOLD(usd(e.get('lifetime_micros',0))))}")
+        print(f"  today       {GREEN(usd(e.get('today_micros',0)))}")
+        if e.get("cap"): print(f"  cap         {e['cap']}")
+        if e.get("blocked"): print("  "+RED("account blocked"))
+    else:
+        print(f"  live        {DIM('unavailable ('+(err or '?')+')')}")
+    pts = [(r["ts"], r["micros"]) for r in rows if isinstance(r.get("micros"), (int, float))]
+    if len(pts) >= 2 and pts[-1][1] > pts[0][1]:
+        span_h = (pts[-1][0]-pts[0][0])/3.6e6; gained = pts[-1][1]-pts[0][1]
+        if span_h > 0:
+            per_h = gained/span_h
+            print(f"\n  velocity    {usd(per_h)}/hr  ·  ~{usd(per_h*24)}/day"+DIM(f"   (over {span_h:.1f}h)"))
+    per, _ = attribute(rows); rota = sum(1 for r in rows if r.get("title")); tot = sum(per.values())
+    if tot > 0 and rota > 0: print(f"  eff. rate   ~{usd(tot/rota)} per rotation"+DIM("  (your share)"))
+    if e and tot > 0:
+        print(f"  attributed  {tot/max(1,e.get('lifetime_micros',0))*100:.0f}%"+DIM(" of lifetime mapped to specific ads"))
+    if p:
+        print(f"\n  view thresh {DIM(str(p.get('view_threshold_seconds','?'))+'s to count an impression')}")
+        print(f"  rotation    {DIM(str(p.get('rotation_interval_seconds','?'))+'s · ttl '+str(p.get('ttl_seconds','?'))+'s')}")
+    if src: print(f"  source      {DIM(src['name']+' token')}")
+    print(" "+DIM("─"*52))
+    print(DIM("  CPM / advertiser cost is server-side only and never sent to clients."))
+
+def fmt_age(s):
+    if s is None: return "no cache"
+    if s < 90: return f"{s:.0f}s ago"
+    if s < 5400: return f"{s/60:.0f}m ago"
+    return f"{s/3600:.1f}h ago"
+
+def render(d, e, p, err, src):
+    L = [" "+BOLD("Kickbacks.ai"), " "+DIM("─"*52)]
+    L.append(f"  status      {d['_vc'](BOLD(d['verdict']))}")
+    if d["health"]: L.append(f"  health      {d['health']}")
+    if d["cc_version"]: L.append(f"  CC version  {d['cc_version']}")
+    L.append("")
+    if e:
+        L.append(f"  earned      {GREEN(BOLD(usd(e.get('lifetime_micros',0))))} lifetime  ·  {GREEN(usd(e.get('today_micros',0)))} today")
+        if e.get("blocked"): L.append("  "+RED("account blocked"))
+    elif err == "network disabled":
+        L.append(f"  earned      {DIM('— network off (kickback enable network)')}")
+    else:
+        L.append(f"  earned      {DIM('— live fetch unavailable ('+(err or '?')+')')}")
+    L.append("")
+    if d["ad_text"]:
+        L.append(f"  current ad  {d['ad_text']}")
+        if d["ad_url"]: L.append(f"              {DIM('→ '+d['ad_url'])}")
+        warm = GREEN("fresh ✓") if d["ad_fresh"] else YELLOW("stale (editor closed)")
+        L.append(f"  ad cache    {fmt_age(d['ad_age'])} · {warm}")
+    else:
+        L.append(f"  current ad  {DIM('none cached')}")
+    if p:
+        L.append(f"  rules       {DIM(str(p.get('view_threshold_seconds','?'))+'s to count · rotates '+str(p.get('rotation_interval_seconds','?'))+'s')}")
+    L.append("")
+    L.append(f"  spinner     {GREEN('replace ✓') if d['spinner_on'] else RED('not set')}")
+    L.append(f"  statusline  {GREEN('wired ✓') if d['statusline_on'] else RED('not set')}")
+    if src and src.get("exp"):
+        left = (src["exp"]-int(time.time()))/60
+        L.append(f"  token       {(GREEN(f'{left:.0f}m') if left>2 else YELLOW('expiring'))} {DIM('('+src['name']+')')}")
+    L.append(" "+DIM("─"*52))
+    L.append(DIM("  kickback earnings · history · daily · about · doctor"))
+    return "\n".join(L)
+
+# ---------- config / features ---------------------------------------------
+FEATURE_HELP = {
+    "sampler": "60s background job (launchd) that logs each ad rotation + earnings, building your history & daily charts. Writes only to your local data dir.",
+    "notifications": "daily macOS notification with your earnings + top ad, at the hour in config (notify_hour).",
+    "token_refresh": "RISKY: when your editor is CLOSED and the token is about to expire, mint a fresh one and write it back into the editor's local store (a backup is saved first). Off = earnings just show 'unavailable' until you open the editor.",
+    "network": "allow the tool to contact the Kickbacks backend at all. Off = fully offline; only on-disk status is shown, no earnings.",
+}
+
+def show_config():
+    co = cfg()
+    print(" "+BOLD("kickback config")+DIM(f"   ({CFG_PATH})")); print(" "+DIM("─"*60))
+    print(f"  network        {GREEN('on') if co.get('network_enabled') else RED('off')}   {DIM('contact Kickbacks backend')}")
+    for k in ("sampler", "notifications", "token_refresh"):
+        on = feature(k)
+        tag = (GREEN("on ") if on else DIM("off"))
+        risk = RED("  ⚠ writes to editor store") if k == "token_refresh" else ""
+        print(f"  {k.ljust(14)} {tag}{risk}")
+    print(" "+DIM("─"*60))
+    print(f"  backend        {DIM(co['backend_base_url'])}")
+    print(f"  data dir       {DIM(co['vibe_ads_dir'])}")
+    print(DIM("  toggle:  kickback enable <feature>  /  kickback disable <feature>"))
+    print(DIM("  edit anything by hand:  $EDITOR "+CFG_PATH))
+
+def set_feature(name, on):
+    co = cfg()
+    if name == "network":
+        co["network_enabled"] = on; save_cfg(co); print(f"network {'enabled' if on else 'disabled'}."); return
+    if name not in ("sampler", "notifications", "token_refresh"):
+        print(f"unknown feature '{name}'. Options: sampler, notifications, token_refresh, network."); return
+    co["features"][name] = on; save_cfg(co)
+    if name == "sampler":
+        install_sampler() if on else uninstall_sampler()
+    elif name == "notifications":
+        install_notify() if on else uninstall_notify()
+    elif name == "token_refresh" and on:
+        print(RED("  ⚠ token_refresh enabled.")+" It only acts when the editor is CLOSED, backs up")
+        print("    your tokens first, and writes the rotated token back so sign-in stays valid.")
+    print(f"{name} {'enabled' if on else 'disabled'}.")
+
+def cmd_about():
+    print(BOLD("kickback — what it does, what it touches, what could break\n"))
+    print(BOLD("What it is"))
+    print("  A local companion to the Kickbacks.ai editor extension. It reads the")
+    print("  state that extension already stores on your machine and (optionally)")
+    print("  asks Kickbacks' own backend for your earnings — then shows it in your")
+    print("  terminal. It is not affiliated with Kickbacks.\n")
+    print(BOLD("What it reads (all local, all yours)"))
+    print("  • "+DIM(cfg()['vibe_ads_dir']+"/cli-ad.json, debug.log")+"  — current ad + status the extension wrote")
+    print("  • "+DIM(cfg()['claude_settings'])+"  — to confirm the spinner/statusline are wired")
+    print("  • your editor's local DB (state.vscdb) — to read YOUR Kickbacks access token")
+    print("  • your macOS Keychain — the key that decrypts that token (same as the editor uses)\n")
+    print(BOLD("What it sends over the network"))
+    print("  • ONLY when network is on: your own access token + Claude Code version,")
+    print("    to Kickbacks' OWN backend ("+DIM(cfg()['backend_base_url'])+").")
+    print("  • Nothing is sent to the author or any third party. Ever.\n")
+    print(BOLD("What it never does"))
+    print("  • read your code, prompts, or completions  • move money or click ads")
+    print("  • bake in your account, paths, or device — all discovered at runtime\n")
+    print(BOLD("Safe by default — features you opt into"))
+    for k in ("network", "sampler", "notifications", "token_refresh"):
+        print(f"  • {BOLD(k)}: {FEATURE_HELP[k]}")
+    print()
+    print(BOLD("What could change or break it")+DIM("  (it degrades gracefully — never crashes)"))
+    print("  • Extension update changes the token format/keys  → earnings show 'unavailable'")
+    print("  • Backend endpoint/URL changes                    → 'HTTP 4xx/5xx'; edit backend_base_url in config")
+    print("  • macOS Keychain scheme changes                   → 'keychain denied'")
+    print("  • You sign out / token expires with editor closed → 'unavailable' until you reopen it")
+    print("  All of these only affect the EARNINGS numbers; on-disk status keeps working.\n")
+    print(DIM("  Run `kickback doctor` for a live check, `kickback config` for current toggles."))
+
+def cmd_doctor():
+    co = cfg()
+    print(" "+BOLD("kickback doctor")); print(" "+DIM("─"*56))
+    # python / crypto backend
+    try:
+        import cryptography  # noqa
+        cryp = "cryptography"
+    except ImportError:
+        cryp = "openssl" if subprocess.run(["which", "openssl"], capture_output=True).returncode == 0 else RED("NONE")
+    print(f"  crypto backend  {cryp}")
+    print(f"  config          {CFG_PATH}")
+    print(f"  network         {GREEN('on') if co.get('network_enabled') else YELLOW('off')}")
+    # editors
+    srcs = token_sources(); now = int(time.time())
+    if not srcs:
+        print("  editors         "+RED("none signed in")+DIM("  (sign in via the extension)"))
+    for s in srcs:
+        exp = s.get("exp"); left = f"{(exp-now)/60:.0f}m" if exp else "?"
+        ok = GREEN("valid "+left) if (exp and exp > now) else RED("expired")
+        print(f"  editor:{s['name'].ljust(7)} {ok}  {DIM(('running' if s['running'] else 'closed'))}")
+    # backend reachability
+    if co.get("network_enabled") and srcs:
+        st, _ = last_session_state()
+        e, p, err, _ = fetch_live(st.get("ccVersion"))
+        print(f"  backend         {GREEN('reachable') if e else RED('error: '+str(err))}")
+    # extension presence
+    exts = []
+    for g in ("~/.vscode/extensions", "~/.cursor/extensions"):
+        d = os.path.expanduser(g)
+        if os.path.isdir(d):
+            exts += [x for x in os.listdir(d) if x.startswith("kickbacksai.kickbacks-ai")]
+    print(f"  extension       {(GREEN(', '.join(sorted(set(exts)))) if exts else YELLOW('not found in VS Code/Cursor'))}")
+    # launchd jobs vs config
+    for label, feat in ((SAMPLER_LABEL, "sampler"), (NOTIFY_LABEL, "notifications")):
+        loaded = subprocess.run(["launchctl", "list", label], capture_output=True).returncode == 0
+        want = feature(feat)
+        sync = GREEN("ok") if loaded == want else YELLOW(f"config={want} job={'loaded' if loaded else 'absent'}")
+        print(f"  job:{feat.ljust(11)} {sync}")
+    print(" "+DIM("─"*56))
+    print(DIM("  `kickback about` explains each item and what could change it."))
+
+def cmd_init():
+    fresh = not os.path.exists(CFG_PATH)
+    cfg()  # creates it if missing
+    print(GREEN("✓ ")+("created" if fresh else "found")+f" config: {CFG_PATH}")
+    print(DIM("  Safe defaults: read-only status + earnings on; sampler/notifications/refresh off."))
+    print()
+    show_config()
+    print()
+    print(DIM("  Next:  kickback about   (what it touches)   ·   kickback doctor   (live check)"))
+
+# ---------- launchd / alias / notify --------------------------------------
+def _plist(label, prog_args, interval=None, calendar=None, errp=None):
+    p = os.path.expanduser(os.path.join("~/Library/LaunchAgents", label+".plist"))
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    args = "".join(f"<string>{a}</string>" for a in prog_args)
+    sched = f"<key>StartInterval</key><integer>{interval}</integer>" if interval else ""
+    if calendar:
+        sched = (f"<key>StartCalendarInterval</key><dict><key>Hour</key><integer>{calendar[0]}</integer>"
+                 f"<key>Minute</key><integer>{calendar[1]}</integer></dict>")
+    runatload = "<key>RunAtLoad</key><true/>" if interval else ""
+    errx = f"<key>StandardErrorPath</key><string>{errp}</string>" if errp else ""
+    with open(p, "w") as f:
+        f.write(f'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>Label</key><string>{label}</string>
+<key>ProgramArguments</key><array>{args}</array>{sched}{runatload}{errx}</dict></plist>
+''')
+    subprocess.run(["launchctl", "unload", p], stderr=subprocess.DEVNULL)
+    r = subprocess.run(["launchctl", "load", p], capture_output=True, text=True)
+    return p, r.returncode == 0, r.stderr.strip()
+
+def install_sampler():
+    os.makedirs(VA(), exist_ok=True)
+    p, ok, e = _plist(SAMPLER_LABEL, [SELF, "log", "--quiet"], interval=60, errp=os.path.join(VA(), "sampler.err"))
+    print(f"  sampler job loaded ({p})" if ok else f"  load failed: {e}")
+def uninstall_sampler():
+    p = os.path.expanduser(os.path.join("~/Library/LaunchAgents", SAMPLER_LABEL+".plist"))
+    subprocess.run(["launchctl", "unload", p], stderr=subprocess.DEVNULL)
+    try: os.remove(p); print("  sampler job removed")
+    except FileNotFoundError: pass
+def install_notify():
+    hh = int(cfg().get("notify_hour", 21))
+    p, ok, e = _plist(NOTIFY_LABEL, [SELF, "notify"], calendar=(hh, 0), errp=os.path.join(VA(), "notify.err"))
+    print(f"  daily notification at {hh:02d}:00 ({p})" if ok else f"  load failed: {e}")
+def uninstall_notify():
+    p = os.path.expanduser(os.path.join("~/Library/LaunchAgents", NOTIFY_LABEL+".plist"))
+    subprocess.run(["launchctl", "unload", p], stderr=subprocess.DEVNULL)
+    try: os.remove(p); print("  daily notification removed")
+    except FileNotFoundError: pass
+def install_alias():
+    line = f"alias kb='{APP}'"
+    try: existing = open(ZSHRC).read() if os.path.exists(ZSHRC) else ""
+    except Exception: existing = ""
+    if "alias kb=" in existing: print("kb alias already present in ~/.zshrc"); return
+    with open(ZSHRC, "a") as f: f.write(f"\n# Kickbacks status shortcut\n{line}\n")
+    print("Added `kb` alias to ~/.zshrc — open a new shell or `source ~/.zshrc`.")
+
+def notify():
+    state, _ = last_session_state()
+    e, p, _err, _src = fetch_live(state.get("ccVersion"))
+    rows = read_hist(); per, _ = attribute(rows)
+    top = max(per.items(), key=lambda kv: kv[1])[0] if per else None
+    if e:
+        sub = f"${float(e.get('today_micros',0))/1e6:.4f} today · ${float(e.get('lifetime_micros',0))/1e6:.4f} lifetime"
+        msg = f"Top ad: {top[:40]}" if top else "Keep coding to earn."
+    else:
+        sub, msg = "earnings unavailable", "Open your editor to refresh sign-in."
+    esc = lambda s: s.replace('"', '\\"')
+    subprocess.run(["osascript", "-e", f'display notification "{esc(msg)}" with title "Kickbacks" subtitle "{esc(sub)}"'])
+    print(sub, "·", msg)
+
+def watch():
+    secs = int(positional(1, "5") or 5)
+    try:
+        while True:
+            d = gather(); e, p, err, src = fetch_live(d["cc_version"])
+            sys.stdout.write("\033[2J\033[H"); print(render(d, e, p, err, src))
+            print(DIM(f"\n  ↻ every {secs}s · Ctrl-C to exit · {time.strftime('%H:%M:%S')}"))
+            sys.stdout.flush(); time.sleep(secs)
+    except KeyboardInterrupt:
+        print()
+
+def refresh_cmd():
+    if not feature("token_refresh"):
+        print("token_refresh is off (safe default). Enable with `kickback enable token_refresh`."); return
+    srcs = token_sources()
+    if not srcs: print("No signed-in editor."); return
+    for s in srcs:
+        if s["running"] and not flag("--force"):
+            print(f"{s['name']} is running — skipping (it refreshes itself; --force to override)."); continue
+        nt = _do_refresh(s, quiet=False)
+        if nt:
+            cl = _jwt_claims(nt); print(f"  {s['name']}: new token valid ~{(cl.get('exp',0)-int(time.time()))/60:.0f}m")
+
+USAGE = """kickback — Kickbacks.ai status, earnings & ad history in the terminal
+
+  kickback                 status + live earnings + current ad
+  kickback earnings        lifetime/today, velocity, derived rate
+  kickback history|ads     ads seen, counts, derived $ per ad
+  kickback daily|chart     per-day earnings sparkline
+  kickback auth            per-editor token: account, expiry
+  kickback watch [secs]    live auto-refreshing view
+  kickback notify          fire a macOS notification now
+
+  kickback config          show settings + feature toggles
+  kickback enable  <feat>  sampler | notifications | token_refresh | network
+  kickback disable <feat>
+  kickback refresh [--force]   mint a fresh token (needs token_refresh, editor closed)
+  kickback about           what it reads/sends + what could break
+  kickback doctor          live diagnostics
+  kickback init            create config with safe defaults
+  kickback install-alias   add `kb` shortcut to ~/.zshrc
+
+Flags: --json  --plain  --offline  --no-log
+"""
+
+def main():
+    sub = ARGS[0] if ARGS and not ARGS[0].startswith("-") else None
+    if sub in ("version", "--version", "-V") or flag("--version"):
+        print(f"{APP} {VERSION}"); return
+    if sub in ("help", "-h", "--help"): print(USAGE); return
+    if sub in ("history", "ads"): return show_history()
+    if sub == "earnings": return show_earnings()
+    if sub in ("daily", "chart"): return show_daily()
+    if sub == "auth": return show_auth()
+    if sub == "config": return show_config()
+    if sub == "enable": return set_feature(positional(1, ""), True)
+    if sub == "disable": return set_feature(positional(1, ""), False)
+    if sub == "about": return cmd_about()
+    if sub == "doctor": return cmd_doctor()
+    if sub == "init": return cmd_init()
+    if sub == "refresh": return refresh_cmd()
+    if sub == "watch": return watch()
+    if sub == "notify": return notify()
+    if sub == "log": return log_ad(quiet=flag("--quiet"))
+    if sub == "install-alias": return install_alias()
+    if sub in ("install-sampler", "uninstall-sampler", "install-notify", "uninstall-notify"):
+        return {"install-sampler": lambda: set_feature("sampler", True),
+                "uninstall-sampler": lambda: set_feature("sampler", False),
+                "install-notify": lambda: set_feature("notifications", True),
+                "uninstall-notify": lambda: set_feature("notifications", False)}[sub]()
+    # default: status
+    d = gather()
+    e, p, err, src = (None, None, "offline", None) if flag("--offline") else fetch_live(d["cc_version"])
+    if not flag("--no-log"):
+        try: log_ad(quiet=True)
+        except Exception: pass
+    if flag("--json"):
+        d.pop("_vc", None)
+        print(json.dumps({**d, "earnings": e, "earnings_error": err,
+                          "token_source": (src or {}).get("name")}, indent=2))
+    else:
+        print(render(d, e, p, err, src))
+
+if __name__ == "__main__":
+    main()
