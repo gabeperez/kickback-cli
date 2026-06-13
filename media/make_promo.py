@@ -63,7 +63,7 @@ STORYBOARD = [
     # montage cleanly — they live in the slower demo + README instead.
 
     # --- gratitude (soft, accurate trust signal) ---
-    Card("a big thanks to the Kickbacks.ai team.", style="dim", hold=1.4),
+    Card("powered by Kickbacks.ai", style="dim", hold=1.4),
 
     # --- call to action ---
     CTA(brand="Kickbacks CLI",

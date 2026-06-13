@@ -4,7 +4,7 @@ A small, local terminal companion for the [Kickbacks.ai](https://kickbacks.ai) V
 
 ![platform](https://img.shields.io/badge/platform-macOS-black) ![deps](https://img.shields.io/badge/deps-python3%20%2B%20openssl-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
-> Independent companion tool, built with the blessing of the Kickbacks.ai maker. Not operated by Kickbacks.
+> Powered by Kickbacks.ai — an independent companion tool, not operated by Kickbacks.ai.
 
 ![kickback demo](media/kickback-demo.gif)
 
@@ -135,7 +135,7 @@ The backend exposes **only aggregate earnings** (lifetime/today) — never CPM, 
 
 **Is this safe to run?** It's read-only by default and never sends your data anywhere but Kickbacks' own server (your own token, like the extension does). `kickback about` lists every file it touches.
 
-**Will it get my account banned?** This tool exists with the maker's blessing. The risky writes (`token_refresh`) are opt-in, guarded to when the editor is closed, and back up your tokens first.
+**Will it get my account banned?** It's read-only by default. The risky writes (`token_refresh`) are opt-in, guarded to when the editor is closed, and back up your tokens first.
 
 **Does it work with Cursor?** Yes — it reads whichever editor (VS Code or Cursor) is signed in, picking the longest-valid token.
 
