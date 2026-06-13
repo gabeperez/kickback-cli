@@ -66,9 +66,9 @@ STORYBOARD = [
     Card("a big thanks to the Kickbacks.ai team.", style="dim", hold=1.4),
 
     # --- call to action ---
-    CTA(brand="kickback",
+    CTA(brand="Kickbacks CLI",
         tagline="see everything you're earning.",
-        command="brew install kickback",
+        command="brew install gabeperez/kickback/kickback",
         url="https://gabeperez.github.io/kickback-cli"),
 ]
 # ===========================================================================

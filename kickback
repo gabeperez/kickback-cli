@@ -17,10 +17,10 @@ DESIGN PRINCIPLES (see `kickback about`):
 No third-party Python packages required: crypto uses the `cryptography` module
 if present, otherwise falls back to the system `openssl` (always on macOS).
 """
-import json, os, re, sys, time, sqlite3, subprocess, hashlib, base64, urllib.request, urllib.error
+import json, os, re, sys, time, sqlite3, subprocess, hashlib, base64, shutil, urllib.request, urllib.error, urllib.parse
 
 APP = "kickback"
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 CONFIG_DIR = os.path.expanduser(os.path.join("~", ".config", APP))
 CFG_PATH = os.path.join(CONFIG_DIR, "config.json")
 SELF = os.path.abspath(__file__)
@@ -637,6 +637,121 @@ def cmd_doctor():
     print(" "+DIM("─"*56))
     print(DIM("  `kickback about` explains each item and what could change it."))
 
+KICKBACKS_EXT = "Kickbacksai.kickbacks-ai"
+CLAUDE_EXT = "anthropic.claude-code"
+def _find_code():
+    """Return path to the VS Code `code` CLI, or None. (Kickbacks ships on the
+    MS Marketplace, which the VS Code CLI uses; Cursor uses Open VSX and can't
+    install it, so we target VS Code here.)"""
+    p = shutil.which("code")
+    if p: return p
+    appbin = "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+    return appbin if os.path.exists(appbin) else None
+
+def _store_secret_exact(ed, which, token_str):
+    """Write an editor secret by its exact VS Code key (INSERT OR REPLACE so it
+    works cold-start, before the extension has ever stored anything)."""
+    key = _key(ed["keychain_service"])
+    keyname = 'secret://{"extensionId":"kickbacksai.kickbacks-ai","key":"kickbacks.%s"}' % which
+    val = json.dumps({"type": "Buffer", "data": list(_enc(token_str, key))})
+    con = sqlite3.connect(expand(ed["state_db"]), timeout=5)
+    try:
+        con.execute("INSERT OR REPLACE INTO ItemTable(key,value) VALUES(?,?)", (keyname, val))
+        con.commit()
+    finally:
+        con.close()
+
+def cmd_login():
+    """Full CLI sign-in: run Kickbacks' device flow, open the browser for the
+    Google click, poll for tokens, and write them into the editor's store."""
+    print(YELLOW("⚠  CLI login is experimental") +
+          DIM(" — the official “Kickbacks: Sign in” button in your editor is recommended."))
+    if not flag("--yes"):
+        if sys.stdin.isatty():
+            try:
+                if input("   Continue anyway? [y/N] ").strip().lower() not in ("y", "yes"):
+                    print("aborted."); return
+            except (EOFError, KeyboardInterrupt):
+                print("\naborted."); return
+        else:
+            print(DIM("   non-interactive: re-run with --yes to confirm.")); return
+    eds = cfg()["editors"]
+    target = (next((e for e in eds if e["name"] == "Code" and os.path.exists(expand(e["state_db"]))), None)
+              or next((e for e in eds if os.path.exists(expand(e["state_db"]))), None) or eds[0])
+    if not os.path.exists(expand(target["state_db"])):
+        print(RED("No editor store found — run `kickback setup` (or open VS Code once) first.")); return
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k): return None
+    opener = urllib.request.build_opener(_NoRedirect)
+    loc = None
+    try:
+        r = opener.open(BACKEND() + "/v1/auth/extension/start", timeout=15)
+        loc = r.headers.get("Location")
+    except urllib.error.HTTPError as e:
+        loc = e.headers.get("Location")
+    except Exception as ex:
+        print(RED(f"login: couldn't reach the backend ({type(ex).__name__})")); return
+    if not loc:
+        print(RED("login: server returned no auth URL")); return
+    state = urllib.parse.parse_qs(urllib.parse.urlparse(loc).query).get("state", [None])[0]
+    if not state:
+        print(RED("login: no state in auth URL")); return
+
+    print("→ opening your browser to sign in with Google…")
+    subprocess.run(["open", loc])
+    print(DIM("  waiting for you to finish in the browser (up to ~4 min)…"))
+    tok = ref = None
+    for _ in range(120):
+        time.sleep(2)
+        try:
+            with urllib.request.urlopen(
+                BACKEND() + "/v1/auth/extension/poll?state=" + urllib.parse.quote(state), timeout=12) as r:
+                j = json.loads(r.read())
+        except Exception:
+            continue
+        if j.get("access_token"):
+            tok, ref = j["access_token"], j.get("refresh_token"); break
+        sys.stdout.write("."); sys.stdout.flush()
+    print()
+    if not tok:
+        print(RED("login timed out — re-run `kickback login`.")); return
+
+    _store_secret_exact(target, "access", tok)
+    if ref: _store_secret_exact(target, "refresh", ref)
+    email = _jwt_claims(tok).get("email", "?")
+    print(GREEN(f"✓ signed in as {email}") + DIM(f"  (token stored for {target['name']})"))
+    e, _p, _err, _s = fetch_live(None)
+    if e:
+        print(f"  lifetime {GREEN(usd(e.get('lifetime_micros', 0)))} · today {GREEN(usd(e.get('today_micros', 0)))}")
+    print(DIM("  `kickback` now works from the terminal. If your editor is open, reload its"))
+    print(DIM("  window (Cmd+Shift+P → Reload Window) so the ad spinner picks up the sign-in."))
+
+def cmd_setup():
+    print(BOLD("kickback setup — installing your editor + extensions\n"))
+    code = _find_code()
+    if not code:
+        if shutil.which("brew"):
+            print("→ VS Code not found — installing (brew install --cask visual-studio-code)…")
+            subprocess.run(["brew", "install", "--cask", "visual-studio-code"])
+            code = _find_code()
+        else:
+            print(RED("VS Code not found and Homebrew isn't installed."))
+            print("  Install VS Code from https://code.visualstudio.com, then re-run `kickback setup`.")
+            return
+    if not code:
+        print(RED("Could not locate the `code` CLI after install.")); return
+    for ext, label in ((KICKBACKS_EXT, "Kickbacks"), (CLAUDE_EXT, "Claude Code")):
+        print(f"→ installing {label} extension…")
+        subprocess.run([code, "--install-extension", ext])
+    subprocess.run(["open", "-a", "Visual Studio Code"])
+    print()
+    print(GREEN("Almost done — one click left") + DIM("  (Google sign-in can't be scripted):"))
+    print("  1. In VS Code, click " + BOLD("\"Kickbacks: Sign in\"") + " in the status bar → sign in with Google")
+    print("  2. Back here, verify with:  " + BOLD("kickback doctor"))
+    print()
+    print(DIM("  (then `kickback` shows your live earnings — no need to reopen the editor)"))
+
 def cmd_init():
     fresh = not os.path.exists(CFG_PATH)
     cfg()  # creates it if missing
@@ -747,6 +862,8 @@ USAGE = """kickback — Kickbacks.ai status, earnings & ad history in the termin
   kickback refresh [--force]   mint a fresh token (needs token_refresh, editor closed)
   kickback about           what it reads/sends + what could break
   kickback doctor          live diagnostics
+  kickback setup           install VS Code + Kickbacks + Claude Code extensions
+  kickback login           sign in from the CLI (opens browser for Google, writes token)
   kickback init            create config with safe defaults
   kickback install-alias   add `kb` shortcut to ~/.zshrc
 
@@ -768,6 +885,8 @@ def main():
     if sub == "about": return cmd_about()
     if sub == "doctor": return cmd_doctor()
     if sub == "init": return cmd_init()
+    if sub == "setup": return cmd_setup()
+    if sub == "login": return cmd_login()
     if sub == "refresh": return refresh_cmd()
     if sub == "watch": return watch()
     if sub == "notify": return notify()

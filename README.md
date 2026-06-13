@@ -1,6 +1,6 @@
-# kickback
+# Kickbacks CLI
 
-A small, local terminal companion for the [Kickbacks.ai](https://kickbacks.ai) VS Code / Cursor extension — see your **status, live earnings, ad history, and derived economics** without opening the editor.
+A small, local terminal companion for the [Kickbacks.ai](https://kickbacks.ai) VS Code / Cursor extension — see your **status, live earnings, ad history, and derived economics** without opening the editor. (The command is `kickback`.)
 
 ![platform](https://img.shields.io/badge/platform-macOS-black) ![deps](https://img.shields.io/badge/deps-python3%20%2B%20openssl-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
@@ -31,10 +31,17 @@ git clone https://github.com/gabeperez/kickback-cli && cd kickback-cli && ./inst
 
 It copies one script to `~/.local/bin/kickback` and writes a config with **safe defaults** (everything that writes anything is off until you opt in).
 
-## Quickstart
+## Quickstart — zero to earnings, all from the terminal
 
 ```bash
-kickback            # status + live earnings + current ad
+kickback setup      # installs VS Code + the Kickbacks & Claude Code extensions
+kickback login      # sign in from the CLI (opens browser for Google) — experimental
+kickback            # your live earnings, right in the terminal
+```
+
+`kickback setup` leaves a single "Kickbacks: Sign in" click in VS Code — the official, recommended sign-in. `kickback login` is an experimental shortcut that does it entirely from the CLI. Already set up? Just run `kickback`.
+
+```bash
 kickback about      # exactly what it reads, sends, and never does
 kickback doctor     # live health check
 ```
@@ -74,6 +81,8 @@ kickback disable notifications  # opt out (removes it)
 
 | Command | What it shows / does |
 |---|---|
+| `kickback setup` | install VS Code + the Kickbacks & Claude Code extensions |
+| `kickback login` | sign in from the CLI (browser → Google → writes token) — **experimental** |
 | `kickback` | status + live earnings + current ad |
 | `kickback earnings` | lifetime/today, velocity, derived per-rotation rate, attribution % |
 | `kickback history` (`ads`) | ads seen, counts, derived $ per ad |

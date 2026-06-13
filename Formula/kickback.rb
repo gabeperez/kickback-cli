@@ -5,12 +5,12 @@
 #
 # `url`/`sha256` point at a GitHub release tarball produced by ./release.sh.
 class Kickback < Formula
-  desc "Terminal companion for the Kickbacks.ai editor extension (status, earnings, ad history)"
+  desc "Kickbacks CLI — terminal companion for the Kickbacks.ai editor extension"
   homepage "https://gabeperez.github.io/kickback-cli"
-  url "https://github.com/gabeperez/kickback-cli/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "78e8c4ff677f832e5e1227266f3de14623ca06bb4a6c736bf3b84c05f2c4ff6a"
+  url "https://github.com/gabeperez/kickback-cli/archive/refs/tags/v0.1.1.tar.gz"
+  sha256 "REPLACE_WITH_TARBALL_SHA256"
   license "MIT"
-  version "0.1.0"
+  version "0.1.1"
 
   depends_on "python@3.12" => :recommended  # uses stdlib + openssl; cryptography optional
   depends_on :macos
