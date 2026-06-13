@@ -56,7 +56,7 @@
     <div class="blessed">Powered by <b>Kickbacks.ai</b> · independent companion tool</div>
   </header>
 
-  <video autoplay loop muted playsinline poster="kickback-poster.png"
+  <video id="hero" autoplay loop muted playsinline poster="kickback-poster.png"
          style="width:100%;border:1px solid var(--line);border-radius:12px;display:block">
     <source src="kickback-demo.mp4" type="video/mp4">
     <img src="kickback-demo.gif" alt="kickback terminal demo" style="width:100%">
@@ -138,6 +138,15 @@
 
 </div>
 <script>
+  (function(){
+    var v = document.getElementById("hero");
+    if (v) {
+      var RATE = 1.75;                     // hero video playback speed
+      var set = function(){ try { v.playbackRate = RATE; } catch(e){} };
+      ["loadedmetadata","play","ratechange","canplay"].forEach(function(ev){ v.addEventListener(ev, set); });
+      set();
+    }
+  })();
   document.querySelectorAll(".copy").forEach(function(b){
     b.addEventListener("click", function(){
       navigator.clipboard.writeText(b.getAttribute("data-cmd"));
