@@ -20,7 +20,7 @@ if present, otherwise falls back to the system `openssl` (always on macOS).
 import json, os, re, sys, time, sqlite3, subprocess, hashlib, base64, shutil, urllib.request, urllib.error, urllib.parse
 
 APP = "kickback"
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 CONFIG_DIR = os.path.expanduser(os.path.join("~", ".config", APP))
 CFG_PATH = os.path.join(CONFIG_DIR, "config.json")
 SELF = os.path.abspath(__file__)
@@ -423,6 +423,7 @@ def show_history():
         a["count"] += 1; a["first"] = min(a["first"], r["ts"]); a["last"] = max(a["last"], r["ts"])
     has = any(per.values())
     print(" "+BOLD("Kickbacks — ads seen")+DIM(f"   ({len(agg)} distinct · {len(rows)} samples)"))
+    print("  "+DIM("n× times seen · ")+GREEN("$")+DIM(" est. earned (approx) · w= ad weight · first → last"))
     print(" "+DIM("─"*66))
     for t, a in sorted(agg.items(), key=lambda kv: per.get(kv[0], 0) if has else kv[1]["count"], reverse=True):
         money = "  "+GREEN(usd(per[t])) if per.get(t) else ""
@@ -430,7 +431,7 @@ def show_history():
         print(f"  {BOLD(str(a['count']).rjust(4))}×{money}  {t[:46]}{w}")
         print(f"        {DIM(when(a['first'])+'  →  '+when(a['last']))}")
     print(" "+DIM("─"*66))
-    print(DIM("  count = sampled rotations · $ = derived ~50% share (approx, not billed)"))
+    print(DIM("  $ is derived, not billed — run `kickback earnings` for your real total."))
 
 def show_daily():
     d = _demo_daily() if _demo_on() else (read_json(path_daily()) or {})
@@ -868,6 +869,11 @@ USAGE = """kickback — Kickbacks.ai status, earnings & ad history in the termin
   kickback install-alias   add `kb` shortcut to ~/.zshrc
 
 Flags: --json  --plain  --offline  --no-log
+
+Reading `history`:  n× = times an ad was sampled in rotation · $ = est. earned
+  from it (your ~50% share, approx, not billed) · w = its rotation weight.
+  Most rows show no $ (an ad only credits when viewed past the ~15s threshold).
+  Your real total is `kickback earnings`.
 """
 
 def main():
