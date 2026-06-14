@@ -8,7 +8,7 @@ class Kickback < Formula
   desc "Kickbacks CLI — terminal companion for the Kickbacks.ai editor extension"
   homepage "https://gabeperez.github.io/kickback-cli"
   url "https://github.com/gabeperez/kickback-cli/archive/refs/tags/v0.1.2.tar.gz"
-  sha256 "REPLACE_WITH_TARBALL_SHA256"
+  sha256 "3dea6ad2ab6d5de729cdf9a9cf2493bd4e806da4dabaf0aec1805a06fa9200de"
   license "MIT"
   version "0.1.2"
 
