@@ -20,7 +20,7 @@ if present, otherwise falls back to the system `openssl` (always on macOS).
 import json, os, re, sys, time, sqlite3, subprocess, hashlib, base64, shutil, urllib.request, urllib.error, urllib.parse
 
 APP = "kickback"
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 CONFIG_DIR = os.path.expanduser(os.path.join("~", ".config", APP))
 CFG_PATH = os.path.join(CONFIG_DIR, "config.json")
 SELF = os.path.abspath(__file__)
@@ -36,6 +36,7 @@ DEFAULT_CONFIG = {
         "sampler": False,           # 60s launchd job that logs ad rotations + earnings
         "notifications": False,     # daily macOS notification with your earnings
         "token_refresh": False,     # RISKY: mint+persist a fresh token when editor is closed
+        "autorewire": False,        # on each run, restore spinner/statusline keys if stripped
     },
     "notify_hour": 21,
     "backend_base_url": "https://kickbacks-backend-gmdaqm2c7q-uw.a.run.app",
@@ -532,6 +533,7 @@ FEATURE_HELP = {
     "sampler": "60s background job (launchd) that logs each ad rotation + earnings, building your history & daily charts. Writes only to your local data dir.",
     "notifications": "daily macOS notification with your earnings + top ad, at the hour in config (notify_hour).",
     "token_refresh": "RISKY: when your editor is CLOSED and the token is about to expire, mint a fresh one and write it back into the editor's local store (a backup is saved first). Off = earnings just show 'unavailable' until you open the editor.",
+    "autorewire": "on the 60s sampler tick, restore the spinner/statusline keys in ~/.claude/settings.json if another tool (Claude Code, hooks) stripped them while the extension is serving. Only-if-missing, atomic, only those two keys. Needs `sampler` on (it's the timer). Off = run `kickback rewire` by hand.",
     "network": "allow the tool to contact the Kickbacks backend at all. Off = fully offline; only on-disk status is shown, no earnings.",
 }
 
@@ -539,10 +541,10 @@ def show_config():
     co = cfg()
     print(" "+BOLD("kickback config")+DIM(f"   ({CFG_PATH})")); print(" "+DIM("─"*60))
     print(f"  network        {GREEN('on') if co.get('network_enabled') else RED('off')}   {DIM('contact Kickbacks backend')}")
-    for k in ("sampler", "notifications", "token_refresh"):
+    for k in ("sampler", "notifications", "token_refresh", "autorewire"):
         on = feature(k)
         tag = (GREEN("on ") if on else DIM("off"))
-        risk = RED("  ⚠ writes to editor store") if k == "token_refresh" else ""
+        risk = RED("  ⚠ writes to editor store") if k == "token_refresh" else (DIM("  writes settings.json") if k == "autorewire" else "")
         print(f"  {k.ljust(14)} {tag}{risk}")
     print(" "+DIM("─"*60))
     print(f"  backend        {DIM(co['backend_base_url'])}")
@@ -554,8 +556,8 @@ def set_feature(name, on):
     co = cfg()
     if name == "network":
         co["network_enabled"] = on; save_cfg(co); print(f"network {'enabled' if on else 'disabled'}."); return
-    if name not in ("sampler", "notifications", "token_refresh"):
-        print(f"unknown feature '{name}'. Options: sampler, notifications, token_refresh, network."); return
+    if name not in ("sampler", "notifications", "token_refresh", "autorewire"):
+        print(f"unknown feature '{name}'. Options: sampler, notifications, token_refresh, autorewire, network."); return
     co["features"][name] = on; save_cfg(co)
     if name == "sampler":
         install_sampler() if on else uninstall_sampler()
@@ -564,6 +566,8 @@ def set_feature(name, on):
     elif name == "token_refresh" and on:
         print(RED("  ⚠ token_refresh enabled.")+" It only acts when the editor is CLOSED, backs up")
         print("    your tokens first, and writes the rotated token back so sign-in stays valid.")
+    elif name == "autorewire" and on and not feature("sampler"):
+        print(DIM("  note: autorewire fires on the 60s sampler tick — enable it too:  kickback enable sampler"))
     print(f"{name} {'enabled' if on else 'disabled'}.")
 
 def cmd_about():
@@ -637,6 +641,47 @@ def cmd_doctor():
         print(f"  job:{feat.ljust(11)} {sync}")
     print(" "+DIM("─"*56))
     print(DIM("  `kickback about` explains each item and what could change it."))
+
+def _desired_wiring():
+    """The (spinnerVerbs, statusLine) the extension would write — used to restore
+    them if another settings.json writer (Claude Code, hooks) strips them."""
+    ad = read_json(path_ad()) or {}
+    spin = {"mode": "replace", "verbs": [ad["adText"]]} if ad.get("adText") else None
+    script = os.path.join(VA(), "vibe-ads-statusline.mjs")
+    sl = {"type": "command", "command": f'node "{script}"', "padding": 0} if os.path.exists(script) else None
+    return spin, sl
+
+def rewire(quiet=False, only_if_missing=True):
+    """Restore the spinner/statusline keys in ~/.claude/settings.json. Touches
+    ONLY those two keys, bails if the file isn't valid JSON, writes atomically."""
+    path = expand(cfg()["claude_settings"])
+    try:
+        with open(path) as f: data = json.load(f)
+    except FileNotFoundError:
+        if not quiet: print("settings.json not found — nothing to rewire."); return False
+    except Exception:
+        if not quiet: print(RED("settings.json isn't valid JSON — leaving it untouched.")); return False
+    spin, sl = _desired_wiring()
+    if spin is None and sl is None:
+        if not quiet:
+            print(DIM("nothing to restore — the extension isn't serving (its statusline script/ad are gone)."))
+            print(DIM("open a VS Code window; spinner/statusline are wired only while it's active."))
+        return False
+    changed = []
+    have_spin = bool((data.get("spinnerVerbs") or {}).get("verbs"))
+    have_sl = "vibe-ads-statusline" in ((data.get("statusLine") or {}).get("command") or "")
+    if spin is not None and (not only_if_missing or not have_spin) and data.get("spinnerVerbs") != spin:
+        data["spinnerVerbs"] = spin; changed.append("spinner")
+    if sl is not None and (not only_if_missing or not have_sl) and data.get("statusLine") != sl:
+        data["statusLine"] = sl; changed.append("statusline")
+    if not changed:
+        if not quiet: print("already wired ✓ — nothing to do.")
+        return False
+    tmp = path + ".kbtmp"
+    with open(tmp, "w") as f: json.dump(data, f, indent=2)
+    os.replace(tmp, path)                       # atomic — never leaves a half-written file
+    if not quiet: print("rewired:", ", ".join(changed))
+    return True
 
 KICKBACKS_EXT = "Kickbacksai.kickbacks-ai"
 CLAUDE_EXT = "anthropic.claude-code"
@@ -893,10 +938,16 @@ def main():
     if sub == "init": return cmd_init()
     if sub == "setup": return cmd_setup()
     if sub == "login": return cmd_login()
+    if sub == "rewire": return rewire(quiet=False, only_if_missing=False)
     if sub == "refresh": return refresh_cmd()
     if sub == "watch": return watch()
     if sub == "notify": return notify()
-    if sub == "log": return log_ad(quiet=flag("--quiet"))
+    if sub == "log":
+        # the 60s sampler tick — also the cadence for autorewire (only-if-missing)
+        if feature("autorewire") and not _demo_on():
+            try: rewire(quiet=True, only_if_missing=True)
+            except Exception: pass
+        return log_ad(quiet=flag("--quiet"))
     if sub == "install-alias": return install_alias()
     if sub in ("install-sampler", "uninstall-sampler", "install-notify", "uninstall-notify"):
         return {"install-sampler": lambda: set_feature("sampler", True),

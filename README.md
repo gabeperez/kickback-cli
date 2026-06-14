@@ -70,6 +70,7 @@ Every feature that *writes* anything is **off** until you enable it:
 | `sampler` | off | 60s background job logging ad rotations + earnings → history/daily charts |
 | `notifications` | off | daily macOS notification with your earnings |
 | `token_refresh` | off | ⚠ when the editor is **closed**, refresh an expiring token and write it back (a backup is saved first) |
+| `autorewire` | off | on the 60s sampler tick, restore the spinner/statusline keys in `settings.json` if another tool (Claude Code, hooks) stripped them while the extension is serving (only-if-missing, atomic). Needs `sampler` on. |
 
 ```bash
 kickback config                 # see all toggles
@@ -95,6 +96,7 @@ kickback disable notifications  # opt out (removes it)
 | `kickback config` | show settings + feature toggles |
 | `kickback enable` / `disable <feature>` | `network` · `sampler` · `notifications` · `token_refresh` |
 | `kickback refresh [--force]` | mint a fresh token (needs `token_refresh`; editor closed) |
+| `kickback rewire` | restore the spinner/statusline keys in `settings.json` if they got stripped (no-ops if the extension isn't serving) |
 | `kickback install-alias` | add a `kb` shortcut to `~/.zshrc` |
 | `kickback --version` · `help` | version / usage |
 

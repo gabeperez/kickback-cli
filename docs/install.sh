@@ -11,8 +11,8 @@
 set -euo pipefail
 
 # ---- pinned release ------------------------------------------------------
-SCRIPT_URL="${KICKBACK_SCRIPT_URL:-https://raw.githubusercontent.com/gabeperez/kickback-cli/v0.1.2/kickback}"
-SHA256_EXPECTED="7e9616ba868a19859bf2b6d2d7cbc9e9cf833685392b8c467257cc013fe165d3"
+SCRIPT_URL="${KICKBACK_SCRIPT_URL:-https://raw.githubusercontent.com/gabeperez/kickback-cli/v0.1.3/kickback}"
+SHA256_EXPECTED="ae417974bf68a3f0a461b73553f0430ce1cb6bb7b2af1506fb1a2fbfc0fd614f"
 # --------------------------------------------------------------------------
 
 BIN="${KICKBACK_BIN:-$HOME/.local/bin}"
