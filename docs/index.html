@@ -45,6 +45,13 @@
   a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
   footer{color:var(--mut);font-size:13px;text-align:center;padding:48px 0 64px;border-top:1px solid var(--line);margin-top:48px}
   .links{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-top:10px}
+  .btnrow{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:18px 0 6px}
+  .btn{display:inline-flex;align-items:center;gap:8px;padding:12px 20px;border-radius:10px;
+    border:1px solid var(--line);background:var(--panel);color:var(--fg);font-weight:600;font-size:15px}
+  .btn:hover{text-decoration:none;border-color:#3a4654}
+  .btn.primary{background:var(--grn);border-color:var(--grn);color:#06210d}
+  .btn.primary:hover{filter:brightness(1.08)}
+  .btn small{font-weight:400;color:inherit;opacity:.8}
 </style>
 </head>
 <body>
@@ -62,7 +69,22 @@
     <img src="kickback-demo.gif" alt="kickback terminal demo" style="width:100%">
   </video>
 
-  <h2>Install</h2>
+  <div class="btnrow">
+    <a class="btn primary" href="KickbacksBar.zip" download>⬇ Download the menu bar app</a>
+    <a class="btn" href="#install">or install the CLI</a>
+  </div>
+  <p style="color:var(--mut);font-size:14px;margin-top:4px">macOS app, signed &amp; notarized by Apple. Includes the <code>kickback</code> CLI.</p>
+
+  <h2>Menu bar app</h2>
+  <p>Prefer a click to a command? <b>Kickbacks Bar</b> keeps your live <i>today · lifetime</i> earnings in the macOS menu bar — and puts the whole CLI (earnings, ad history, daily chart, status) one click away.</p>
+  <img src="kickback-menubar.gif" alt="Kickbacks Bar menu bar app" style="width:100%;border:1px solid var(--line);border-radius:12px;display:block;margin:14px 0">
+
+  <h3>Homebrew — installs the CLI too</h3>
+  <div class="cmd"><span class="p">brew</span> install --cask gabeperez/kickback/kickbacks-bar
+    <button class="copy" data-cmd="brew install --cask gabeperez/kickback/kickbacks-bar">copy</button></div>
+  <p style="color:var(--mut);font-size:14px">The cask pulls in the <code>kickback</code> CLI automatically. The direct <a href="KickbacksBar.zip" download>.zip download</a> needs the CLI installed separately (one line below).</p>
+
+  <h2 id="install">Install the CLI</h2>
   <p>macOS, needs <code>python3</code> + <code>openssl</code> (both ship with macOS). No pip packages.</p>
 
   <h3>One-line install</h3>
