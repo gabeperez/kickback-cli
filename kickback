@@ -20,7 +20,7 @@ if present, otherwise falls back to the system `openssl` (always on macOS).
 import json, os, re, sys, time, sqlite3, subprocess, hashlib, base64, shutil, urllib.request, urllib.error, urllib.parse
 
 APP = "kickback"
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 CONFIG_DIR = os.path.expanduser(os.path.join("~", ".config", APP))
 CFG_PATH = os.path.join(CONFIG_DIR, "config.json")
 SELF = os.path.abspath(__file__)
@@ -652,8 +652,80 @@ def show_config():
     print(" "+DIM("─"*60))
     print(f"  backend        {DIM(co['backend_base_url'])}")
     print(f"  data dir       {DIM(co['vibe_ads_dir'])}")
-    print(DIM("  toggle:  kickback enable <feature>  /  kickback disable <feature>"))
-    print(DIM("  edit anything by hand:  $EDITOR "+CFG_PATH))
+    print(f"  notify_hour    {DIM(str(co.get('notify_hour', 21))+':00  (daily notification time)')}")
+    print(" "+DIM("─"*60))
+    print(DIM("  details:  ")+"kickback config <feature>"+DIM("     what it does + how to change it"))
+    print(DIM("  toggle:   ")+"kickback enable/disable <feature>")
+    print(DIM("  set:      ")+"kickback config set <key> <value>"+DIM("   ·  open file: ")+"kickback config edit")
+
+# Scalar (non-feature) keys editable via `kickback config set`.
+_EDITABLE = {"notify_hour": "integer 0–23 (daily notification time)",
+             "backend_base_url": "URL of the Kickbacks backend",
+             "vibe_ads_dir": "dir the extension writes cli-ad.json / debug.log",
+             "claude_settings": "path to ~/.claude/settings.json"}
+
+def config_detail(name):
+    """`kickback config <feature|key>` — full context for one setting + how to change it."""
+    import textwrap
+    co = cfg()
+    if name in FEATURE_HELP:
+        on = co.get("network_enabled", True) if name == "network" else feature(name)
+        state = GREEN("on") if on else DIM("off")
+        print(" "+BOLD(f"kickback config · {name}")+f"   [{state}]"); print(" "+DIM("─"*66))
+        for line in textwrap.wrap(FEATURE_HELP[name], 64): print("  "+line)
+        print(" "+DIM("─"*66))
+        verb = "disable" if on else "enable"
+        print(DIM("  change:  ")+f"kickback {verb} {name}")
+        return
+    if name in co:
+        print(f"  {BOLD(name)} = {json.dumps(co[name])}")
+        hint = _EDITABLE.get(name)
+        if hint: print(DIM(f"  {hint}")); print(DIM("  change:  ")+f"kickback config set {name} <value>")
+        else: print(DIM("  change:  ")+"kickback config edit")
+        return
+    print(f"unknown feature/key '{name}'.")
+    print(DIM("  features: ")+", ".join(FEATURE_HELP))
+    print(DIM("  keys:     ")+", ".join(_EDITABLE))
+
+def config_edit():
+    """Open the config file in $EDITOR (falls back to a sensible default)."""
+    import shlex
+    save_cfg(cfg())                       # make sure the file exists first
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano"
+    try:
+        subprocess.run(shlex.split(editor) + [CFG_PATH])
+    except Exception as ex:
+        print(RED(f"couldn't launch editor '{editor}' ({type(ex).__name__})."))
+        print(DIM("  edit by hand:  ")+CFG_PATH)
+
+def config_get(key):
+    co = cfg()
+    if key and key in co:
+        print(json.dumps(co[key]) if not flag("--json") else json.dumps({key: co[key]}))
+    else:
+        print(f"unknown key '{key or ''}'."); print(DIM("  see all:  ")+"kickback config --json")
+
+def config_set(key, value):
+    if not key or value is None:
+        print("usage:  kickback config set <key> <value>")
+        print(DIM("  editable keys:  ")+", ".join(_EDITABLE)); return
+    if key in ("network", "sampler", "notifications", "token_refresh", "autorewire", "update_check"):
+        print(f"'{key}' is a feature — toggle it:  "+f"kickback enable {key}"+DIM("  /  ")+f"kickback disable {key}"); return
+    if key not in _EDITABLE:
+        print(f"'{key}' isn't a settable scalar.")
+        print(DIM("  editable keys:  ")+", ".join(_EDITABLE))
+        print(DIM("  anything else:  ")+"kickback config edit"); return
+    co = cfg()
+    if key == "notify_hour":
+        try: v = int(value)
+        except ValueError: print(RED("notify_hour must be an integer 0–23.")); return
+        if not (0 <= v <= 23): print(RED("notify_hour must be between 0 and 23.")); return
+        co[key] = v
+    else:
+        co[key] = value
+    save_cfg(co)
+    if flag("--json"): return emit({"key": key, "value": co[key], "ok": True})
+    print(GREEN("✓ ")+f"{key} = {json.dumps(co[key])}")
 
 def set_feature(name, on):
     co = cfg()
@@ -1152,6 +1224,9 @@ USAGE = """kickback — Kickbacks.ai status, earnings & ad history in the termin
   kickback notify          fire a macOS notification now
 
   kickback config          show settings + feature toggles
+  kickback config <feat>   full context for one setting + how to change it
+  kickback config set <key> <value>   edit a value (notify_hour, backend, data dir…)
+  kickback config edit     open the config file in $EDITOR
   kickback enable  <feat>  network | sampler | notifications | token_refresh | autorewire | update_check
   kickback disable <feat>
   kickback update          upgrade to the latest CLI (via brew or the installer)
@@ -1185,7 +1260,13 @@ def main():
     if sub in ("monthly", "month"): return show_period("monthly")
     if sub in ("yearly", "year"): return show_period("yearly")
     if sub == "auth": return show_auth()
-    if sub == "config": return show_config()
+    if sub == "config":
+        a = positional(1)
+        if a == "edit": return config_edit()
+        if a == "set": return config_set(positional(2), positional(3))
+        if a == "get": return config_get(positional(2))
+        if a: return config_detail(a)
+        return show_config()
     if sub == "enable": return set_feature(positional(1, ""), True)
     if sub == "disable": return set_feature(positional(1, ""), False)
     if sub == "about": return cmd_about()

@@ -98,6 +98,9 @@ kickback disable notifications  # opt out (removes it)
 | `kickback about` | what it reads/sends + what could break |
 | `kickback doctor` | live diagnostics |
 | `kickback config` | show settings + feature toggles |
+| `kickback config <feature>` | full context for one setting (what it does, what it touches) + how to change it |
+| `kickback config set <key> <value>` | edit a scalar value (`notify_hour`, `backend_base_url`, `vibe_ads_dir`, `claude_settings`) |
+| `kickback config get <key>` · `edit` | print one value · open the config file in `$EDITOR` |
 | `kickback update` | upgrade to the latest CLI via your install channel (brew or the installer); `--check` reports only, `--json` for scripts |
 | `kickback enable` / `disable <feature>` | `network` · `sampler` · `notifications` · `token_refresh` · `autorewire` · `update_check` |
 | `kickback refresh [--force]` | mint a fresh token (needs `token_refresh`; editor closed) |
