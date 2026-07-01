@@ -20,6 +20,23 @@ echo "Upload:  ./kickback          → https://gabeperez.github.io/kickback-cli/
 echo "Upload:  ./web/install.sh    → https://gabeperez.github.io/kickback-cli/install.sh"
 echo "Set in web/install.sh:  SHA256_EXPECTED=\"$SCRIPT_SHA\""
 
+# 1b) stamp the update manifest served at BASE_URL/latest.json (drives
+#     `kickback update`, the opt-in update_check nudge, and the menu bar app's
+#     "update available" item). The CLI `version` is stamped from the script.
+#     `app_version` changes independently — bump it by hand (or pass APP_VERSION)
+#     ONLY when you ship a new Kickbacks Bar .app with changed Swift/menu items.
+if [ -f docs/latest.json ]; then
+  tmp="$(mktemp)"
+  sed -E "s/(\"version\": *\")[^\"]*(\")/\1$VERSION\2/" docs/latest.json > "$tmp" && mv "$tmp" docs/latest.json
+  if [ -n "${APP_VERSION:-}" ]; then
+    tmp="$(mktemp)"
+    sed -E "s/(\"app_version\": *\")[^\"]*(\")/\1$APP_VERSION\2/" docs/latest.json > "$tmp" && mv "$tmp" docs/latest.json
+    echo "Stamped docs/latest.json → version $VERSION, app_version $APP_VERSION"
+  else
+    echo "Stamped docs/latest.json → version $VERSION  (app_version left as-is; set APP_VERSION=… to bump)"
+  fi
+fi
+
 # 2) tarball for Homebrew (mirrors the GitHub auto-generated tag tarball layout)
 OUT="dist"; mkdir -p "$OUT"
 TARBALL="$OUT/kickback-cli-$VERSION.tar.gz"

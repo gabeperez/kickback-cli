@@ -27,6 +27,11 @@ SELF = os.path.abspath(__file__)
 ZSHRC = os.path.expanduser("~/.zshrc")
 SAMPLER_LABEL = "ai.kickbacks.sampler"
 NOTIFY_LABEL = "ai.kickbacks.daily"
+# Update channel — a tiny version file on our own GitHub Pages site (no GitHub
+# API, no rate limits). Only contacted for `kickback update` (explicit) or when
+# the opt-in `update_check` feature is on. Never carries a token or any user data.
+UPDATE_MANIFEST_URL = "https://gabeperez.github.io/kickback-cli/latest.json"
+INSTALL_ONELINER = "curl -fsSL https://gabeperez.github.io/kickback-cli/install.sh | bash"
 FRESH_MS = 600_000
 
 DEFAULT_CONFIG = {
@@ -37,6 +42,7 @@ DEFAULT_CONFIG = {
         "notifications": False,     # daily macOS notification with your earnings
         "token_refresh": False,     # RISKY: mint+persist a fresh token when editor is closed
         "autorewire": False,        # on each run, restore spinner/statusline keys if stripped
+        "update_check": False,      # once/day, GET our version file + nudge if a newer CLI exists
     },
     "notify_hour": 21,
     "backend_base_url": "https://kickbacks-backend-gmdaqm2c7q-uw.a.run.app",
@@ -59,6 +65,12 @@ def flag(n): return n in ARGS
 def positional(i, default=None):
     pos = [a for a in ARGS if not a.startswith("-")]
     return pos[i] if len(pos) > i else default
+def opt(name, default=None):
+    """Value of a `--name VALUE` or `--name=VALUE` option, else default."""
+    for i, a in enumerate(ARGS):
+        if a == name and i+1 < len(ARGS): return ARGS[i+1]
+        if a.startswith(name+"="): return a.split("=", 1)[1]
+    return default
 NO_COLOR = flag("--plain") or not sys.stdout.isatty() or os.environ.get("NO_COLOR")
 def c(code, s): return s if NO_COLOR else f"\033[{code}m{s}\033[0m"
 DIM=lambda s:c("2",s); BOLD=lambda s:c("1",s); GREEN=lambda s:c("32",s)
@@ -621,6 +633,7 @@ FEATURE_HELP = {
     "notifications": "daily macOS notification with your earnings + top ad, at the hour in config (notify_hour).",
     "token_refresh": "RISKY: when your editor is CLOSED and the token is about to expire, mint a fresh one and write it back into the editor's local store (a backup is saved first). Off = earnings just show 'unavailable' until you open the editor.",
     "autorewire": "on the 60s sampler tick, restore the spinner/statusline keys in ~/.claude/settings.json if another tool (Claude Code, hooks) stripped them while the extension is serving. Only-if-missing, atomic, only those two keys. Needs `sampler` on (it's the timer). Off = run `kickback rewire` by hand.",
+    "update_check": "once a day, GET a small version file from our GitHub Pages site (gabeperez.github.io) and print a one-line nudge if a newer CLI is out. This is the ONLY thing the tool ever sends anywhere other than the Kickbacks backend — and it carries no token, account, or personal data. Off = check yourself with `kickback update`.",
     "network": "allow the tool to contact the Kickbacks backend at all. Off = fully offline; only on-disk status is shown, no earnings.",
 }
 
@@ -629,10 +642,12 @@ def show_config():
     if flag("--json"): return emit({"config_path": CFG_PATH, **co})
     print(" "+BOLD("kickback config")+DIM(f"   ({CFG_PATH})")); print(" "+DIM("─"*60))
     print(f"  network        {GREEN('on') if co.get('network_enabled') else RED('off')}   {DIM('contact Kickbacks backend')}")
-    for k in ("sampler", "notifications", "token_refresh", "autorewire"):
+    for k in ("sampler", "notifications", "token_refresh", "autorewire", "update_check"):
         on = feature(k)
         tag = (GREEN("on ") if on else DIM("off"))
-        risk = RED("  ⚠ writes to editor store") if k == "token_refresh" else (DIM("  writes settings.json") if k == "autorewire" else "")
+        risk = {"token_refresh": RED("  ⚠ writes to editor store"),
+                "autorewire": DIM("  writes settings.json"),
+                "update_check": DIM("  GETs github.io version file")}.get(k, "")
         print(f"  {k.ljust(14)} {tag}{risk}")
     print(" "+DIM("─"*60))
     print(f"  backend        {DIM(co['backend_base_url'])}")
@@ -642,10 +657,10 @@ def show_config():
 
 def set_feature(name, on):
     co = cfg()
-    if name not in ("sampler", "notifications", "token_refresh", "autorewire", "network"):
+    if name not in ("sampler", "notifications", "token_refresh", "autorewire", "update_check", "network"):
         if flag("--json"): return emit({"feature": name, "ok": False, "error": "unknown feature",
-                                        "options": ["network", "sampler", "notifications", "token_refresh", "autorewire"]})
-        print(f"unknown feature '{name}'. Options: sampler, notifications, token_refresh, autorewire, network."); return
+                                        "options": ["network", "sampler", "notifications", "token_refresh", "autorewire", "update_check"]})
+        print(f"unknown feature '{name}'. Options: sampler, notifications, token_refresh, autorewire, update_check, network."); return
     if name == "network":
         co["network_enabled"] = on; save_cfg(co)
     else:
@@ -679,12 +694,14 @@ def cmd_about():
     print(BOLD("What it sends over the network"))
     print("  • ONLY when network is on: your own access token + Claude Code version,")
     print("    to Kickbacks' OWN backend ("+DIM(cfg()['backend_base_url'])+").")
-    print("  • Nothing is sent to the author or any third party. Ever.\n")
+    print("  • If you opt into "+BOLD("update_check")+": a once-a-day GET to our GitHub Pages")
+    print("    site for a version number — no token, account, or personal data attached.")
+    print("  • Nothing else is sent to the author or any third party. Ever.\n")
     print(BOLD("What it never does"))
     print("  • read your code, prompts, or completions  • move money or click ads")
     print("  • bake in your account, paths, or device — all discovered at runtime\n")
     print(BOLD("Safe by default — features you opt into"))
-    for k in ("network", "sampler", "notifications", "token_refresh", "autorewire"):
+    for k in ("network", "sampler", "notifications", "token_refresh", "autorewire", "update_check"):
         print(f"  • {BOLD(k)}: {FEATURE_HELP[k]}")
     print()
     print(BOLD("What could change or break it")+DIM("  (it degrades gracefully — never crashes)"))
@@ -1021,6 +1038,106 @@ def refresh_cmd():
         if nt:
             cl = _jwt_claims(nt); print(f"  {s['name']}: new token valid ~{(cl.get('exp',0)-int(time.time()))/60:.0f}m")
 
+# ---------- self-update / version nudge -----------------------------------
+def _vtuple(s):
+    try: return tuple(int(x) for x in str(s).split(".")[:3])
+    except Exception: return (0,)
+
+def _install_method():
+    """How this copy was installed — 'brew' (managed by Homebrew) or 'web' (install.sh)."""
+    return "brew" if "/Cellar/" in os.path.realpath(SELF) else "web"
+
+def _fetch_manifest(timeout=3):
+    """Full version manifest dict from our Pages site, or None. Never raises.
+    Shape: {version, app_version, app_url, app_upgrade, notes_url, install}."""
+    try:
+        req = urllib.request.Request(UPDATE_MANIFEST_URL, headers={"user-agent": f"{APP}/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            j = json.loads(r.read())
+        return j if isinstance(j, dict) else None
+    except Exception:
+        return None
+
+def _update_cache_path(): return os.path.join(CONFIG_DIR, "update-check.json")
+def _cached_manifest():
+    """Throttled manifest lookup — hits the network at most once/day, else uses cache.
+    Never raises. Returns the manifest dict or None."""
+    try:
+        c = read_json(_update_cache_path()) or {}
+        fresh = isinstance(c.get("checked_at_ms"), (int, float)) and (time.time()*1000 - c["checked_at_ms"] < 86_400_000)
+        if isinstance(c.get("manifest"), dict) and fresh:
+            return c["manifest"]
+        m = _fetch_manifest(timeout=3)
+        if m:
+            try:
+                os.makedirs(CONFIG_DIR, exist_ok=True)
+                with open(_update_cache_path(), "w") as f:
+                    json.dump({"checked_at_ms": int(time.time()*1000), "manifest": m}, f)
+            except OSError: pass
+        return m or (c.get("manifest") if isinstance(c.get("manifest"), dict) else None)
+    except Exception:
+        return None
+
+def _update_nudge():
+    """One-line 'newer version out' string, or None. Opt-in (update_check) + respects network."""
+    if _demo_on() or not feature("update_check") or not cfg().get("network_enabled", True):
+        return None
+    latest = (_cached_manifest() or {}).get("version")
+    if latest and _vtuple(latest) > _vtuple(VERSION):
+        return f"↑ kickback {latest} is out (you have {VERSION}) — run `kickback update`"
+    return None
+
+def _update_block(app_version=None):
+    """The `update` object embedded in status --json — what the menu bar app reads.
+    None unless update_check is on and the manifest is reachable/cached. When the
+    caller passes its own app_version, the block also resolves app_update_available."""
+    if _demo_on() or not feature("update_check") or not cfg().get("network_enabled", True):
+        return None
+    m = _cached_manifest()
+    if not m: return None
+    cli_latest, app_latest = m.get("version"), m.get("app_version")
+    block = {"cli_current": VERSION, "cli_latest": cli_latest,
+             "cli_update_available": bool(cli_latest and _vtuple(cli_latest) > _vtuple(VERSION)),
+             "app_latest": app_latest, "app_url": m.get("app_url"), "app_upgrade": m.get("app_upgrade")}
+    if app_version is not None:
+        block["app_current"] = app_version
+        block["app_update_available"] = bool(app_latest and _vtuple(app_latest) > _vtuple(app_version))
+    return block
+
+def cmd_update():
+    """Self-update. Checks our version manifest, then upgrades via the same channel
+    it was installed from. `--check` reports without changing anything. Pass
+    `--app-version X` (the menu bar app does) to also learn if the .app is stale."""
+    m = _fetch_manifest(timeout=8) or {}
+    latest, method = m.get("version"), _install_method()
+    available = bool(latest and _vtuple(latest) > _vtuple(VERSION))
+    app_cur, app_latest = opt("--app-version"), m.get("app_version")
+    app_available = bool(app_cur and app_latest and _vtuple(app_latest) > _vtuple(app_cur))
+    if flag("--json"):
+        out = {"current": VERSION, "latest": latest, "update_available": available, "method": method}
+        if app_cur is not None or app_latest is not None:
+            out["app"] = {"current": app_cur, "latest": app_latest, "update_available": app_available,
+                          "url": m.get("app_url"), "upgrade": m.get("app_upgrade")}
+        return emit(out)
+    if not m:
+        print(YELLOW("couldn't reach the update server")+DIM(" — showing the manual command below."))
+    elif available:
+        print(f"update available: {DIM(VERSION)} → {GREEN(latest)}")
+    else:
+        print(GREEN(f"✓ up to date — kickback {VERSION} is the latest."))
+    if available or not m:
+        if method == "brew":
+            cmd = ["brew", "upgrade", "kickback"]
+            if flag("--check"): print(DIM("  upgrade with:  "+" ".join(cmd)))
+            else: print(DIM("  running: "+" ".join(cmd))); subprocess.run(cmd)
+            print(DIM("  menu bar app? also:  brew upgrade --cask kickbacks-bar"))
+        else:
+            if flag("--check"): print(DIM("  upgrade with:  "+INSTALL_ONELINER))
+            else: print(DIM("  running: "+INSTALL_ONELINER)); subprocess.run(INSTALL_ONELINER, shell=True)
+    if app_available:
+        print(f"menu bar app: {DIM(app_cur)} → {GREEN(app_latest)}"
+              + DIM(f"  download: {m.get('app_upgrade') or m.get('app_url')}"))
+
 USAGE = """kickback — Kickbacks.ai status, earnings & ad history in the terminal
 
   kickback                 status + live earnings + current ad
@@ -1035,8 +1152,9 @@ USAGE = """kickback — Kickbacks.ai status, earnings & ad history in the termin
   kickback notify          fire a macOS notification now
 
   kickback config          show settings + feature toggles
-  kickback enable  <feat>  network | sampler | notifications | token_refresh | autorewire
+  kickback enable  <feat>  network | sampler | notifications | token_refresh | autorewire | update_check
   kickback disable <feat>
+  kickback update          upgrade to the latest CLI (via brew or the installer)
   kickback rewire          restore spinner/statusline keys if they got stripped
   kickback refresh [--force]   mint a fresh token (needs token_refresh, editor closed)
   kickback about           what it reads/sends + what could break
@@ -1081,6 +1199,7 @@ def main():
         return
     if sub == "refresh": return refresh_cmd()
     if sub == "watch": return watch()
+    if sub in ("update", "upgrade", "self-update"): return cmd_update()
     if sub == "notify": return notify()
     if sub == "log":
         # the 60s sampler tick — also the cadence for autorewire (only-if-missing)
@@ -1102,10 +1221,18 @@ def main():
         except Exception: pass
     if flag("--json"):
         d.pop("_vc", None)
-        print(json.dumps({**d, "earnings": e, "earnings_error": err,
-                          "token_source": (src or {}).get("name")}, indent=2))
+        out = {**d, "earnings": e, "earnings_error": err, "token_source": (src or {}).get("name")}
+        try:
+            upd = _update_block(opt("--app-version"))     # populated only when update_check is on
+            if upd: out["update"] = upd
+        except Exception: pass
+        print(json.dumps(out, indent=2))
     else:
         print(render(d, e, p, err, src))
+        try:
+            n = _update_nudge()
+            if n: print(DIM("  "+n))
+        except Exception: pass
 
 if __name__ == "__main__":
     main()

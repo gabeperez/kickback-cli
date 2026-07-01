@@ -1,0 +1,8 @@
+{
+  "version": "0.1.4",
+  "app_version": "1.0",
+  "app_url": "https://gabeperez.github.io/kickback-cli/KickbacksBar.zip",
+  "app_upgrade": "brew upgrade --cask kickbacks-bar",
+  "notes_url": "https://github.com/gabeperez/kickback-cli/releases",
+  "install": "curl -fsSL https://gabeperez.github.io/kickback-cli/install.sh | bash"
+}

@@ -56,7 +56,7 @@ Run `kickback about` any time for the full, plain-English version. In short:
 - your editor's local `state.vscdb` — to read **your** Kickbacks access token
 - your macOS Keychain — the key that decrypts that token (the same one the editor uses)
 
-**Sends over the network:** only when `network` is on — **your own token + the Claude Code version**, to **Kickbacks' own backend** (the same server the official extension uses). Nothing goes to the author or any third party.
+**Sends over the network:** only when `network` is on — **your own token + the Claude Code version**, to **Kickbacks' own backend** (the same server the official extension uses). The one other destination is optional: if you opt into `update_check`, a once-a-day GET to our GitHub Pages site fetches a version number (no token, account, or personal data). Nothing else goes to the author or any third party.
 
 **Never:** reads your code/prompts/completions, moves money, clicks ads, or bakes in your account/paths/device — everything is discovered at runtime.
 
@@ -71,6 +71,7 @@ Every feature that *writes* anything is **off** until you enable it:
 | `notifications` | off | daily macOS notification with your earnings |
 | `token_refresh` | off | ⚠ when the editor is **closed**, refresh an expiring token and write it back (a backup is saved first) |
 | `autorewire` | off | on the 60s sampler tick, restore the spinner/statusline keys in `settings.json` if another tool (Claude Code, hooks) stripped them while the extension is serving (only-if-missing, atomic). Needs `sampler` on. |
+| `update_check` | off | once a day, fetch a version file from our GitHub Pages site and print a one-line nudge if a newer CLI is out (no token/account sent). Off = check yourself with `kickback update`. |
 
 ```bash
 kickback config                 # see all toggles
@@ -97,7 +98,8 @@ kickback disable notifications  # opt out (removes it)
 | `kickback about` | what it reads/sends + what could break |
 | `kickback doctor` | live diagnostics |
 | `kickback config` | show settings + feature toggles |
-| `kickback enable` / `disable <feature>` | `network` · `sampler` · `notifications` · `token_refresh` |
+| `kickback update` | upgrade to the latest CLI via your install channel (brew or the installer); `--check` reports only, `--json` for scripts |
+| `kickback enable` / `disable <feature>` | `network` · `sampler` · `notifications` · `token_refresh` · `autorewire` · `update_check` |
 | `kickback refresh [--force]` | mint a fresh token (needs `token_refresh`; editor closed) |
 | `kickback rewire` | restore the spinner/statusline keys in `settings.json` if they got stripped (no-ops if the extension isn't serving) |
 | `kickback install-alias` | add a `kb` shortcut to `~/.zshrc` |
@@ -114,6 +116,35 @@ where useful; output is pure ASCII and stays valid JSON even when there's no
 data yet (e.g. `"ads": []`). `doctor --json` adds a top-level `"ok"` boolean for
 monitoring. The interactive/streaming commands (`watch`, `setup`, `login`,
 `init`, `refresh`, `about`) are text-only.
+
+## Staying up to date
+
+`kickback update` upgrades the CLI through whatever channel it was installed
+from (Homebrew or the web installer). If you opt into `update_check`, the normal
+status view prints a one-line nudge (throttled to one network call per day)
+when a newer CLI is out.
+
+**Menu bar app.** *Kickbacks Bar* is a thin wrapper that shells out to this CLI,
+so its earnings/ad data updates the moment the CLI does — the `.app` itself only
+needs replacing for GUI changes. Rather than bundle a second updater, the app
+learns about its own updates *through the CLI it already calls*: when
+`update_check` is on, status `--json` carries an `update` object, and the app
+passes its own version via `--app-version`:
+
+```jsonc
+// kickback --json --app-version 1.0   (the app's periodic call)
+"update": {
+  "cli_current": "0.1.4", "cli_latest": "0.1.5", "cli_update_available": true,
+  "app_current": "1.0",   "app_latest": "1.1",   "app_update_available": true,
+  "app_url": "https://gabeperez.github.io/kickback-cli/KickbacksBar.zip",
+  "app_upgrade": "brew upgrade --cask kickbacks-bar"
+}
+```
+
+When `app_update_available` is true the app shows a "Download update" item. The
+version source is a single manifest (`latest.json`) on our GitHub Pages site;
+ship a new `.app` by bumping its `app_version` there (`APP_VERSION=1.1 ./release.sh`).
+Direct-`.zip` users — who have no Homebrew signal — get the nudge this way too.
 
 ## Configuration
 
