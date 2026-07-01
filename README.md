@@ -88,6 +88,9 @@ kickback disable notifications  # opt out (removes it)
 | `kickback earnings` | lifetime/today, velocity, derived per-rotation rate, attribution % |
 | `kickback history` (`ads`) | ads seen, counts, derived $ per ad |
 | `kickback daily` (`chart`) | per-day earnings sparkline |
+| `kickback weekly` (`week`) | per-ISO-week earnings rollup |
+| `kickback monthly` (`month`) | per-month earnings rollup |
+| `kickback yearly` (`year`) | per-year earnings rollup |
 | `kickback auth` | per-editor token: account + expiry |
 | `kickback watch [secs]` | live auto-refreshing view (default 5s) |
 | `kickback notify` | fire a macOS notification with today's earnings |
@@ -101,6 +104,16 @@ kickback disable notifications  # opt out (removes it)
 | `kickback --version` · `help` | version / usage |
 
 Global flags: `--json` · `--plain` (no color) · `--offline` (no keychain/network) · `--no-log`.
+
+`--json` is honored by every read/report command — status (default), `earnings`,
+`history`, `daily` / `weekly` / `monthly` / `yearly`, `auth`, `config`,
+`doctor`, `version` — and by the action commands `enable` / `disable`,
+`rewire`, and `notify` (which emit an outcome object). Money is always reported
+as canonical integer `micros` (1,000,000 = \$1), with a convenience `usd` float
+where useful; output is pure ASCII and stays valid JSON even when there's no
+data yet (e.g. `"ads": []`). `doctor --json` adds a top-level `"ok"` boolean for
+monitoring. The interactive/streaming commands (`watch`, `setup`, `login`,
+`init`, `refresh`, `about`) are text-only.
 
 ## Configuration
 

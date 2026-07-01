@@ -20,7 +20,7 @@ if present, otherwise falls back to the system `openssl` (always on macOS).
 import json, os, re, sys, time, sqlite3, subprocess, hashlib, base64, shutil, urllib.request, urllib.error, urllib.parse
 
 APP = "kickback"
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 CONFIG_DIR = os.path.expanduser(os.path.join("~", ".config", APP))
 CFG_PATH = os.path.join(CONFIG_DIR, "config.json")
 SELF = os.path.abspath(__file__)
@@ -64,6 +64,7 @@ def c(code, s): return s if NO_COLOR else f"\033[{code}m{s}\033[0m"
 DIM=lambda s:c("2",s); BOLD=lambda s:c("1",s); GREEN=lambda s:c("32",s)
 RED=lambda s:c("31",s); YELLOW=lambda s:c("33",s); CYAN=lambda s:c("36",s)
 def expand(p): return os.path.expanduser(p) if isinstance(p, str) else p
+def emit(obj): print(json.dumps(obj, indent=2, default=str))   # one JSON writer for every --json path
 
 # ---------- config --------------------------------------------------------
 def _detect_initial_features():
@@ -214,8 +215,12 @@ def _do_refresh(src, quiet=False):
         j = _post(ep("refresh"), {"refresh_token": rt})
         new_at = j.get("access_token")
         if not new_at: return None
+        os.makedirs(VA(), exist_ok=True)
+        try: os.chmod(VA(), 0o700)  # owner-only (holds encrypted token backups)
+        except OSError: pass
         bak = os.path.join(VA(), f"token-backup-{src['name']}-{int(time.time()*1000)}.json")
-        with open(bak, "w") as f:
+        fd = os.open(bak, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # owner-only
+        with os.fdopen(fd, "w") as f:
             json.dump({"access": _read_secret(src["ed"]["state_db"], "access"), "refresh": rbuf}, f)
         _store_secret(src, "access", new_at)
         if j.get("refresh_token"): _store_secret(src, "refresh", j["refresh_token"])
@@ -253,7 +258,7 @@ def fetch_live(ccver):
     except subprocess.CalledProcessError: return None, None, "keychain denied", None
     except Exception as ex: return None, None, type(ex).__name__, None
 
-# ---------- on-disk status ------------------------------------------------
+# ---------- small helpers (json read + money formatting) -----------------
 def read_json(p):
     try:
         with open(p) as f: return json.load(f)
@@ -264,8 +269,9 @@ def usd(m):
         return f"${v:,.2f}" if abs(v) >= 1 else f"${v:.4f}"
     except Exception: return "$?"
 
-# --- demo mode (KICKBACK_DEMO=1): coherent illustrative data for screenshots /
-#     marketing. Touches no keychain, token, network, or real history. ---------
+# ---------- demo mode (KICKBACK_DEMO=1) -----------------------------------
+# Coherent illustrative data for screenshots / marketing — touches no
+# keychain, token, network, or real history.
 def _demo_on(): return bool(os.environ.get("KICKBACK_DEMO"))
 _DEMO_ADS = [
     ("Sundial — trustworthy AI data engineering + analysis", "https://sundial.ai/"),
@@ -309,6 +315,7 @@ def _demo_status():
             "ad_text": a[0], "ad_url": a[1], "ad_age": 41.0, "ad_fresh": True,
             "spinner_on": True, "statusline_on": True}
 
+# ---------- on-disk status (extension's debug.log / cli-ad.json / settings) -
 def last_session_state():
     state, last = {}, ""
     try:
@@ -417,11 +424,20 @@ def when(ms): return time.strftime("%b %d %H:%M", time.localtime(ms/1000))
 # ---------- views ---------------------------------------------------------
 def show_history():
     rows = read_hist()
-    if not rows: print("No ad history yet. Enable the sampler: `kickback enable sampler`."); return
     per, _ = attribute(rows); agg = {}
     for r in rows:
         t = r.get("title", "?"); a = agg.setdefault(t, {"count": 0, "first": r["ts"], "last": r["ts"], "weight": r.get("weight")})
         a["count"] += 1; a["first"] = min(a["first"], r["ts"]); a["last"] = max(a["last"], r["ts"])
+    ranked = sorted(agg.items(), key=lambda kv: per.get(kv[0], 0) or kv[1]["count"], reverse=True)
+    if flag("--json"):
+        return emit({
+            "distinct": len(agg), "samples": len(rows), "source": "derived",
+            "note": "$ is derived from lifetime deltas, not billed",
+            "ads": [{"title": t, "count": a["count"], "first_ms": a["first"], "last_ms": a["last"],
+                     "weight": a.get("weight"),
+                     "earned_micros": int(per[t]) if per.get(t) else None,
+                     "earned_usd": round(per[t]/1e6, 6) if per.get(t) else None} for t, a in ranked]})
+    if not rows: print("No ad history yet. Enable the sampler: `kickback enable sampler`."); return
     has = any(per.values())
     print(" "+BOLD("Kickbacks — ads seen")+DIM(f"   ({len(agg)} distinct · {len(rows)} samples)"))
     print("  "+DIM("n× times seen · ")+GREEN("$")+DIM(" est. earned (approx) · w= ad weight · first → last"))
@@ -434,23 +450,75 @@ def show_history():
     print(" "+DIM("─"*66))
     print(DIM("  $ is derived, not billed — run `kickback earnings` for your real total."))
 
-def show_daily():
+# ---------- daily + weekly / monthly / yearly rollups ---------------------
+# All views roll the same per-day buckets (daily.json) up to a chosen grain,
+# so they inherit daily's caveat: the backend keeps no historical record, so a
+# period only counts the days the sampler actually observed. Weeks are ISO
+# (Mon-start), labelled YYYY-Www; a partial current period is normal.
+_PERIOD_FMT  = {"daily": None, "weekly": "%G-W%V", "monthly": "%Y-%m", "yearly": "%Y"}
+_PERIOD_META = {"daily": ("daily earnings", 14),        # (title, rows to list)
+                "weekly": ("weekly earnings", 12),
+                "monthly": ("monthly earnings", 12),
+                "yearly": ("yearly earnings", 10)}
+def _earnings_buckets(period):
+    """{period_key: micros} rolled up from daily.json — canonical micros, never billed.
+    period='daily' keeps raw YYYY-MM-DD keys; coarser grains group by _PERIOD_FMT."""
     d = _demo_daily() if _demo_on() else (read_json(path_daily()) or {})
-    if not d: print("No daily history yet — accrues once the sampler runs across a day (`kickback enable sampler`)."); return
-    keys = sorted(d.keys()); vals = [day_earned(d[k]) for k in keys]
-    print(" "+BOLD("Kickbacks — daily earnings")); print(" "+DIM("─"*52))
+    fmt = _PERIOD_FMT[period]; buckets = {}
+    for day, rec in d.items():
+        if fmt is None:
+            pk = day
+        else:
+            try: pk = time.strftime(fmt, time.strptime(day, "%Y-%m-%d"))
+            except ValueError: continue      # skip any malformed daily key
+        buckets[pk] = buckets.get(pk, 0) + day_earned(rec)
+    return buckets
+
+def _emit_earnings_json(period, buckets):
+    """Machine-readable rollup. micros is the canonical integer (1e6 = $1);
+    usd is a lossless convenience float. Valid JSON even when empty."""
+    keys = sorted(buckets); total = int(sum(buckets.values()))
+    emit({
+        "period": period,
+        "buckets": [{"key": k, "micros": int(buckets[k]), "usd": round(buckets[k]/1e6, 6)} for k in keys],
+        "total_micros": total,
+        "total_usd": round(total/1e6, 6),
+        "source": "derived",            # rolled up from daily.json, not billed
+        "backend_history": False,       # backend keeps no historical record
+    })
+
+def show_period(period="daily"):
+    title, tail = _PERIOD_META[period]
+    buckets = _earnings_buckets(period)
+    if flag("--json"): return _emit_earnings_json(period, buckets)
+    if not buckets:
+        print(f"No {title} yet — accrues once the sampler runs across a day (`kickback enable sampler`)."); return
+    keys = sorted(buckets); vals = [buckets[k] for k in keys]; w = max(len(k) for k in keys)
+    note = "(per-day = max(today, lifetime Δ); backend keeps no daily record)" if period == "daily" \
+        else "(rolled up from daily; backend keeps no historical record)"
+    print(" "+BOLD(f"Kickbacks — {title}")); print(" "+DIM("─"*52))
     if len(vals) > 1: print("  "+CYAN(sparkline(vals))+DIM(f"   {keys[0]} → {keys[-1]}"))
     mx = max(vals) or 1
-    for k in keys[-14:]:
-        bar = "█"*min(30, int(day_earned(d[k])/mx*30))
-        print(f"  {k}  {GREEN(usd(day_earned(d[k])).rjust(9))}  {DIM(bar)}")
+    for k in keys[-tail:]:
+        bar = "█"*min(30, int(buckets[k]/mx*30))
+        print(f"  {k.ljust(w)}  {GREEN(usd(buckets[k]).rjust(9))}  {DIM(bar)}")
     print(" "+DIM("─"*52))
-    print(f"  total observed: {GREEN(usd(sum(vals)))}"+DIM("  (per-day = max(today, lifetime Δ); backend keeps no daily record)"))
+    print(f"  total observed: {GREEN(usd(sum(vals)))}"+DIM("  "+note))
+def show_daily(): return show_period("daily")
 
 def show_auth():
     srcs = token_sources()
-    if not srcs: print("No signed-in editor found (VS Code / Cursor)."); return
     now = int(time.time())
+    if flag("--json"):
+        return emit({
+            "signed_in": bool(srcs),
+            "token_refresh": feature("token_refresh"),
+            "editors": [{"name": s["name"], "email": s["claims"].get("email"),
+                         "exp": s.get("exp"),
+                         "seconds_left": (s["exp"]-now) if s.get("exp") else None,
+                         "valid": bool(s.get("exp") and s["exp"] > now),
+                         "running": bool(s["running"])} for s in srcs]})
+    if not srcs: print("No signed-in editor found (VS Code / Cursor)."); return
     print(" "+BOLD("Kickbacks — auth")); print(" "+DIM("─"*52))
     for s in srcs:
         exp = s.get("exp"); left = f"{(exp-now)/60:.0f}m left" if exp else "?"
@@ -464,6 +532,30 @@ def show_earnings():
     state, _ = last_session_state()
     e, p, err, src = fetch_live(state.get("ccVersion"))
     rows = read_hist()
+    pts = [(r["ts"], r["micros"]) for r in rows if isinstance(r.get("micros"), (int, float))]
+    velocity = None
+    if len(pts) >= 2 and pts[-1][1] > pts[0][1]:
+        span_h = (pts[-1][0]-pts[0][0])/3.6e6
+        if span_h > 0:
+            per_h = (pts[-1][1]-pts[0][1])/span_h
+            velocity = {"per_hour_micros": int(per_h), "per_day_micros": int(per_h*24), "span_hours": round(span_h, 2)}
+    per, _ = attribute(rows); rota = sum(1 for r in rows if r.get("title")); tot = sum(per.values())
+    eff_rate = int(tot/rota) if (tot > 0 and rota > 0) else None
+    attributed_pct = round(tot/max(1, e.get("lifetime_micros", 0))*100, 1) if (e and tot > 0) else None
+    if flag("--json"):
+        return emit({
+            "live": bool(e), "error": None if e else (err or "unavailable"),
+            "lifetime_micros": e.get("lifetime_micros") if e else None,
+            "today_micros": e.get("today_micros") if e else None,
+            "cap": e.get("cap") if e else None,
+            "blocked": bool(e.get("blocked")) if e else None,
+            "velocity": velocity,
+            "eff_rate_micros_per_rotation": eff_rate,
+            "attributed_pct": attributed_pct,
+            "view_threshold_seconds": p.get("view_threshold_seconds") if p else None,
+            "rotation_interval_seconds": p.get("rotation_interval_seconds") if p else None,
+            "ttl_seconds": p.get("ttl_seconds") if p else None,
+            "token_source": (src or {}).get("name")})
     print(" "+BOLD("Kickbacks — earnings")); print(" "+DIM("─"*52))
     if e:
         print(f"  lifetime    {GREEN(BOLD(usd(e.get('lifetime_micros',0))))}")
@@ -472,16 +564,11 @@ def show_earnings():
         if e.get("blocked"): print("  "+RED("account blocked"))
     else:
         print(f"  live        {DIM('unavailable ('+(err or '?')+')')}")
-    pts = [(r["ts"], r["micros"]) for r in rows if isinstance(r.get("micros"), (int, float))]
-    if len(pts) >= 2 and pts[-1][1] > pts[0][1]:
-        span_h = (pts[-1][0]-pts[0][0])/3.6e6; gained = pts[-1][1]-pts[0][1]
-        if span_h > 0:
-            per_h = gained/span_h
-            print(f"\n  velocity    {usd(per_h)}/hr  ·  ~{usd(per_h*24)}/day"+DIM(f"   (over {span_h:.1f}h)"))
-    per, _ = attribute(rows); rota = sum(1 for r in rows if r.get("title")); tot = sum(per.values())
-    if tot > 0 and rota > 0: print(f"  eff. rate   ~{usd(tot/rota)} per rotation"+DIM("  (your share)"))
-    if e and tot > 0:
-        print(f"  attributed  {tot/max(1,e.get('lifetime_micros',0))*100:.0f}%"+DIM(" of lifetime mapped to specific ads"))
+    if velocity:
+        print(f"\n  velocity    {usd(velocity['per_hour_micros'])}/hr  ·  ~{usd(velocity['per_day_micros'])}/day"+DIM(f"   (over {velocity['span_hours']:.1f}h)"))
+    if eff_rate is not None: print(f"  eff. rate   ~{usd(eff_rate)} per rotation"+DIM("  (your share)"))
+    if attributed_pct is not None:
+        print(f"  attributed  {attributed_pct:.0f}%"+DIM(" of lifetime mapped to specific ads"))
     if p:
         print(f"\n  view thresh {DIM(str(p.get('view_threshold_seconds','?'))+'s to count an impression')}")
         print(f"  rotation    {DIM(str(p.get('rotation_interval_seconds','?'))+'s · ttl '+str(p.get('ttl_seconds','?'))+'s')}")
@@ -539,6 +626,7 @@ FEATURE_HELP = {
 
 def show_config():
     co = cfg()
+    if flag("--json"): return emit({"config_path": CFG_PATH, **co})
     print(" "+BOLD("kickback config")+DIM(f"   ({CFG_PATH})")); print(" "+DIM("─"*60))
     print(f"  network        {GREEN('on') if co.get('network_enabled') else RED('off')}   {DIM('contact Kickbacks backend')}")
     for k in ("sampler", "notifications", "token_refresh", "autorewire"):
@@ -554,16 +642,22 @@ def show_config():
 
 def set_feature(name, on):
     co = cfg()
-    if name == "network":
-        co["network_enabled"] = on; save_cfg(co); print(f"network {'enabled' if on else 'disabled'}."); return
-    if name not in ("sampler", "notifications", "token_refresh", "autorewire"):
+    if name not in ("sampler", "notifications", "token_refresh", "autorewire", "network"):
+        if flag("--json"): return emit({"feature": name, "ok": False, "error": "unknown feature",
+                                        "options": ["network", "sampler", "notifications", "token_refresh", "autorewire"]})
         print(f"unknown feature '{name}'. Options: sampler, notifications, token_refresh, autorewire, network."); return
-    co["features"][name] = on; save_cfg(co)
-    if name == "sampler":
-        install_sampler() if on else uninstall_sampler()
-    elif name == "notifications":
-        install_notify() if on else uninstall_notify()
-    elif name == "token_refresh" and on:
+    if name == "network":
+        co["network_enabled"] = on; save_cfg(co)
+    else:
+        co["features"][name] = on; save_cfg(co)
+        if name == "sampler":
+            install_sampler() if on else uninstall_sampler()
+        elif name == "notifications":
+            install_notify() if on else uninstall_notify()
+    if flag("--json"): return emit({"feature": name, "enabled": on, "ok": True})
+    if name == "network":
+        print(f"network {'enabled' if on else 'disabled'}."); return
+    if name == "token_refresh" and on:
         print(RED("  ⚠ token_refresh enabled.")+" It only acts when the editor is CLOSED, backs up")
         print("    your tokens first, and writes the rotated token back so sign-in stays valid.")
     elif name == "autorewire" and on and not feature("sampler"):
@@ -590,7 +684,7 @@ def cmd_about():
     print("  • read your code, prompts, or completions  • move money or click ads")
     print("  • bake in your account, paths, or device — all discovered at runtime\n")
     print(BOLD("Safe by default — features you opt into"))
-    for k in ("network", "sampler", "notifications", "token_refresh"):
+    for k in ("network", "sampler", "notifications", "token_refresh", "autorewire"):
         print(f"  • {BOLD(k)}: {FEATURE_HELP[k]}")
     print()
     print(BOLD("What could change or break it")+DIM("  (it degrades gracefully — never crashes)"))
@@ -601,47 +695,64 @@ def cmd_about():
     print("  All of these only affect the EARNINGS numbers; on-disk status keeps working.\n")
     print(DIM("  Run `kickback doctor` for a live check, `kickback config` for current toggles."))
 
-def cmd_doctor():
+def _doctor_report():
+    """Structured diagnostics — one source of truth for both the text and --json views."""
     co = cfg()
-    print(" "+BOLD("kickback doctor")); print(" "+DIM("─"*56))
-    # python / crypto backend
     try:
         import cryptography  # noqa
         cryp = "cryptography"
     except ImportError:
-        cryp = "openssl" if subprocess.run(["which", "openssl"], capture_output=True).returncode == 0 else RED("NONE")
-    print(f"  crypto backend  {cryp}")
-    print(f"  config          {CFG_PATH}")
-    print(f"  network         {GREEN('on') if co.get('network_enabled') else YELLOW('off')}")
-    # editors
+        cryp = "openssl" if subprocess.run(["which", "openssl"], capture_output=True).returncode == 0 else None
     srcs = token_sources(); now = int(time.time())
-    if not srcs:
-        print("  editors         "+RED("none signed in")+DIM("  (sign in via the extension)"))
-    for s in srcs:
-        exp = s.get("exp"); left = f"{(exp-now)/60:.0f}m" if exp else "?"
-        ok = GREEN("valid "+left) if (exp and exp > now) else RED("expired")
-        print(f"  editor:{s['name'].ljust(7)} {ok}  {DIM(('running' if s['running'] else 'closed'))}")
-    # backend reachability
+    editors = [{"name": s["name"], "valid": bool(s.get("exp") and s["exp"] > now),
+                "seconds_left": (s["exp"]-now) if s.get("exp") else None,
+                "running": bool(s["running"])} for s in srcs]
+    backend = None
     if co.get("network_enabled") and srcs:
         st, _ = last_session_state()
-        e, p, err, _ = fetch_live(st.get("ccVersion"))
-        print(f"  backend         {GREEN('reachable') if e else RED('error: '+str(err))}")
-    # extension presence
+        e, _p, err, _ = fetch_live(st.get("ccVersion"))
+        backend = {"reachable": bool(e), "error": None if e else str(err)}
     exts = []
     for g in ("~/.vscode/extensions", "~/.cursor/extensions"):
         d = os.path.expanduser(g)
         if os.path.isdir(d):
             exts += [x for x in os.listdir(d) if x.startswith("kickbacksai.kickbacks-ai")]
-    print(f"  extension       {(GREEN(', '.join(sorted(set(exts)))) if exts else YELLOW('not found in VS Code/Cursor'))}")
-    # launchd jobs vs config
+    jobs = {}
     for label, feat in ((SAMPLER_LABEL, "sampler"), (NOTIFY_LABEL, "notifications")):
         loaded = subprocess.run(["launchctl", "list", label], capture_output=True).returncode == 0
         want = feature(feat)
-        sync = GREEN("ok") if loaded == want else YELLOW(f"config={want} job={'loaded' if loaded else 'absent'}")
+        jobs[feat] = {"config": want, "loaded": loaded, "ok": loaded == want}
+    return {"crypto_backend": cryp, "config_path": CFG_PATH,
+            "network": bool(co.get("network_enabled")), "editors": editors,
+            "backend": backend, "extension": sorted(set(exts)), "jobs": jobs}
+
+def cmd_doctor():
+    r = _doctor_report()
+    if flag("--json"):
+        r["ok"] = bool(r["crypto_backend"]) and (r["backend"] is None or r["backend"]["reachable"]) \
+                  and all(j["ok"] for j in r["jobs"].values())
+        return emit(r)
+    print(" "+BOLD("kickback doctor")); print(" "+DIM("─"*56))
+    print(f"  crypto backend  {r['crypto_backend'] or RED('NONE')}")
+    print(f"  config          {r['config_path']}")
+    print(f"  network         {GREEN('on') if r['network'] else YELLOW('off')}")
+    if not r["editors"]:
+        print("  editors         "+RED("none signed in")+DIM("  (sign in via the extension)"))
+    for ed in r["editors"]:
+        left = f"{ed['seconds_left']/60:.0f}m" if ed["seconds_left"] is not None else "?"
+        ok = GREEN("valid "+left) if ed["valid"] else RED("expired")
+        print(f"  editor:{ed['name'].ljust(7)} {ok}  {DIM('running' if ed['running'] else 'closed')}")
+    if r["backend"] is not None:
+        b = r["backend"]
+        print(f"  backend         {GREEN('reachable') if b['reachable'] else RED('error: '+str(b['error']))}")
+    print(f"  extension       {(GREEN(', '.join(r['extension'])) if r['extension'] else YELLOW('not found in VS Code/Cursor'))}")
+    for feat, j in r["jobs"].items():
+        sync = GREEN("ok") if j["ok"] else YELLOW(f"config={j['config']} job={'loaded' if j['loaded'] else 'absent'}")
         print(f"  job:{feat.ljust(11)} {sync}")
     print(" "+DIM("─"*56))
     print(DIM("  `kickback about` explains each item and what could change it."))
 
+# ---------- rewire: restore the spinner/statusline keys -------------------
 def _desired_wiring():
     """The (spinnerVerbs, statusLine) the extension would write — used to restore
     them if another settings.json writer (Claude Code, hooks) strips them."""
@@ -653,20 +764,23 @@ def _desired_wiring():
 
 def rewire(quiet=False, only_if_missing=True):
     """Restore the spinner/statusline keys in ~/.claude/settings.json. Touches
-    ONLY those two keys, bails if the file isn't valid JSON, writes atomically."""
+    ONLY those two keys, bails if the file isn't valid JSON, writes atomically.
+    Returns {rewired, changed, reason} so callers can report the outcome."""
     path = expand(cfg()["claude_settings"])
     try:
         with open(path) as f: data = json.load(f)
     except FileNotFoundError:
-        if not quiet: print("settings.json not found — nothing to rewire."); return False
+        if not quiet: print("settings.json not found — nothing to rewire.")
+        return {"rewired": False, "changed": [], "reason": "settings.json not found"}
     except Exception:
-        if not quiet: print(RED("settings.json isn't valid JSON — leaving it untouched.")); return False
+        if not quiet: print(RED("settings.json isn't valid JSON — leaving it untouched."))
+        return {"rewired": False, "changed": [], "reason": "settings.json not valid JSON"}
     spin, sl = _desired_wiring()
     if spin is None and sl is None:
         if not quiet:
             print(DIM("nothing to restore — the extension isn't serving (its statusline script/ad are gone)."))
             print(DIM("open a VS Code window; spinner/statusline are wired only while it's active."))
-        return False
+        return {"rewired": False, "changed": [], "reason": "extension not serving"}
     changed = []
     have_spin = bool((data.get("spinnerVerbs") or {}).get("verbs"))
     have_sl = "vibe-ads-statusline" in ((data.get("statusLine") or {}).get("command") or "")
@@ -676,13 +790,14 @@ def rewire(quiet=False, only_if_missing=True):
         data["statusLine"] = sl; changed.append("statusline")
     if not changed:
         if not quiet: print("already wired ✓ — nothing to do.")
-        return False
+        return {"rewired": False, "changed": [], "reason": "already wired"}
     tmp = path + ".kbtmp"
     with open(tmp, "w") as f: json.dump(data, f, indent=2)
     os.replace(tmp, path)                       # atomic — never leaves a half-written file
     if not quiet: print("rewired:", ", ".join(changed))
-    return True
+    return {"rewired": True, "changed": changed, "reason": "rewired"}
 
+# ---------- onboarding: setup + login -------------------------------------
 KICKBACKS_EXT = "Kickbacksai.kickbacks-ai"
 CLAUDE_EXT = "anthropic.claude-code"
 def _find_code():
@@ -763,8 +878,13 @@ def cmd_login():
     if not tok:
         print(RED("login timed out — re-run `kickback login`.")); return
 
-    _store_secret_exact(target, "access", tok)
-    if ref: _store_secret_exact(target, "refresh", ref)
+    try:
+        _store_secret_exact(target, "access", tok)
+        if ref: _store_secret_exact(target, "refresh", ref)
+    except Exception as ex:
+        print(RED(f"signed in, but couldn't store the token ({type(ex).__name__})."))
+        print(DIM("  Close the editor (so it isn't holding the database) and re-run `kickback login`."))
+        return
     email = _jwt_claims(tok).get("email", "?")
     print(GREEN(f"✓ signed in as {email}") + DIM(f"  (token stored for {target['name']})"))
     e, _p, _err, _s = fetch_live(None)
@@ -861,12 +981,13 @@ def notify():
     rows = read_hist(); per, _ = attribute(rows)
     top = max(per.items(), key=lambda kv: kv[1])[0] if per else None
     if e:
-        sub = f"${float(e.get('today_micros',0))/1e6:.4f} today · ${float(e.get('lifetime_micros',0))/1e6:.4f} lifetime"
+        sub = f"{usd(e.get('today_micros',0))} today · {usd(e.get('lifetime_micros',0))} lifetime"
         msg = f"Top ad: {top[:40]}" if top else "Keep coding to earn."
     else:
         sub, msg = "earnings unavailable", "Open your editor to refresh sign-in."
     esc = lambda s: s.replace('"', '\\"')
-    subprocess.run(["osascript", "-e", f'display notification "{esc(msg)}" with title "Kickbacks" subtitle "{esc(sub)}"'])
+    rc = subprocess.run(["osascript", "-e", f'display notification "{esc(msg)}" with title "Kickbacks" subtitle "{esc(sub)}"']).returncode
+    if flag("--json"): return emit({"sent": rc == 0, "subtitle": sub, "message": msg})
     print(sub, "·", msg)
 
 def watch():
@@ -886,8 +1007,16 @@ def refresh_cmd():
     srcs = token_sources()
     if not srcs: print("No signed-in editor."); return
     for s in srcs:
-        if s["running"] and not flag("--force"):
-            print(f"{s['name']} is running — skipping (it refreshes itself; --force to override)."); continue
+        if s["running"]:
+            if not flag("--force"):
+                print(f"{s['name']} is running — skipping (it refreshes itself; --force to override)."); continue
+            # --force on a running editor rotates the server-side refresh token and can sign it out.
+            try:
+                ans = input(f"{s['name']} is running — refreshing may sign it out. Continue? [y/N] ").strip().lower()
+            except EOFError:
+                ans = ""
+            if ans not in ("y", "yes"):
+                print("  skipped."); continue
         nt = _do_refresh(s, quiet=False)
         if nt:
             cl = _jwt_claims(nt); print(f"  {s['name']}: new token valid ~{(cl.get('exp',0)-int(time.time()))/60:.0f}m")
@@ -898,13 +1027,17 @@ USAGE = """kickback — Kickbacks.ai status, earnings & ad history in the termin
   kickback earnings        lifetime/today, velocity, derived rate
   kickback history|ads     ads seen, counts, derived $ per ad
   kickback daily|chart     per-day earnings sparkline
+  kickback weekly|week     per-ISO-week earnings rollup
+  kickback monthly|month   per-month earnings rollup
+  kickback yearly|year     per-year earnings rollup
   kickback auth            per-editor token: account, expiry
   kickback watch [secs]    live auto-refreshing view
   kickback notify          fire a macOS notification now
 
   kickback config          show settings + feature toggles
-  kickback enable  <feat>  sampler | notifications | token_refresh | network
+  kickback enable  <feat>  network | sampler | notifications | token_refresh | autorewire
   kickback disable <feat>
+  kickback rewire          restore spinner/statusline keys if they got stripped
   kickback refresh [--force]   mint a fresh token (needs token_refresh, editor closed)
   kickback about           what it reads/sends + what could break
   kickback doctor          live diagnostics
@@ -924,11 +1057,15 @@ Reading `history`:  n× = times an ad was sampled in rotation · $ = est. earned
 def main():
     sub = ARGS[0] if ARGS and not ARGS[0].startswith("-") else None
     if sub in ("version", "--version", "-V") or flag("--version"):
+        if flag("--json"): emit({"app": APP, "version": VERSION}); return
         print(f"{APP} {VERSION}"); return
     if sub in ("help", "-h", "--help"): print(USAGE); return
     if sub in ("history", "ads"): return show_history()
     if sub == "earnings": return show_earnings()
     if sub in ("daily", "chart"): return show_daily()
+    if sub in ("weekly", "week"): return show_period("weekly")
+    if sub in ("monthly", "month"): return show_period("monthly")
+    if sub in ("yearly", "year"): return show_period("yearly")
     if sub == "auth": return show_auth()
     if sub == "config": return show_config()
     if sub == "enable": return set_feature(positional(1, ""), True)
@@ -938,7 +1075,10 @@ def main():
     if sub == "init": return cmd_init()
     if sub == "setup": return cmd_setup()
     if sub == "login": return cmd_login()
-    if sub == "rewire": return rewire(quiet=False, only_if_missing=False)
+    if sub == "rewire":
+        res = rewire(quiet=flag("--json"), only_if_missing=False)
+        if flag("--json"): emit(res)
+        return
     if sub == "refresh": return refresh_cmd()
     if sub == "watch": return watch()
     if sub == "notify": return notify()

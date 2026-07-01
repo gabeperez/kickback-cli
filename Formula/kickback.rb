@@ -7,10 +7,12 @@
 class Kickback < Formula
   desc "Kickbacks CLI — terminal companion for the Kickbacks.ai editor extension"
   homepage "https://gabeperez.github.io/kickback-cli"
-  url "https://github.com/gabeperez/kickback-cli/archive/refs/tags/v0.1.3.tar.gz"
-  sha256 "f2330c864cfb319a26b214f05414e1188b5937ac33c7b3e1c0a58c4d34954e2a"
+  url "https://github.com/gabeperez/kickback-cli/archive/refs/tags/v0.1.4.tar.gz"
+  # After `git tag v0.1.4 && git push --tags`, stamp this with:
+  #   curl -sL https://github.com/gabeperez/kickback-cli/archive/refs/tags/v0.1.4.tar.gz | shasum -a 256
+  sha256 "STAMP_AFTER_TAG_PUSH"
   license "MIT"
-  version "0.1.3"
+  version "0.1.4"
 
   depends_on "python@3.12" => :recommended  # uses stdlib + openssl; cryptography optional
   depends_on :macos
