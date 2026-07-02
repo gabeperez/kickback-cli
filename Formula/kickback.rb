@@ -10,7 +10,7 @@ class Kickback < Formula
   url "https://github.com/gabeperez/kickback-cli/archive/refs/tags/v0.1.6.tar.gz"
   # After `git tag v0.1.6 && git push --tags`, stamp this with:
   #   curl -sL https://github.com/gabeperez/kickback-cli/archive/refs/tags/v0.1.6.tar.gz | shasum -a 256
-  sha256 "STAMP_AFTER_TAG_PUSH"
+  sha256 "a36f5b4606c6bdf6fb4bd07d869aa6560e3487dd54f57fe0f9e7a585d4225604"
   license "MIT"
   version "0.1.6"
 
