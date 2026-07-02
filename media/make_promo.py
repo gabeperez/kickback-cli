@@ -52,10 +52,11 @@ OPENER = [
 
 # each function: a tagline (the value) → the command (the proof)
 FEATURES = [
-    Card("everything, at a glance.",     style="greenbold", hold=1.0), Run("",         hold=1.8),
+    Run("",         hold=1.8),   # the flagship status view (the opener card leads into it)
     Card("track every cent.",            style="greenbold", hold=1.0), Run("earnings", hold=1.6),
     Card("day by day.",                  style="greenbold", hold=1.0), Run("daily",    hold=1.4),
-    Card("week. month. year.",           style="greenbold", hold=1.0), Run("weekly",   hold=1.4),
+    Card("week. month. year.",           style="greenbold", hold=1.0),
+        Run("weekly", hold=1.2), Run("monthly", hold=1.2), Run("yearly", hold=1.4),
     Card("every ad you've seen.",        style="greenbold", hold=1.0), Run("history",  hold=1.5, trim=11),
     # NOTE: `watch` (runs forever) and `notify` (fires a real notification) don't
     # montage cleanly — they live in the slower demo + README instead.
@@ -64,7 +65,7 @@ FEATURES = [
 # the reveal — in the launch cut, the menu bar VIDEO plays right after this card.
 MENUBAR_TEASE = [Card("Oh, it's also on your menu bar.", style="greenbold", hold=1.8)]
 GRATITUDE     = [Card("powered by Kickbacks.ai", style="dim", hold=1.4)]
-CTA_STEP      = [CTA(brand="Kickbacks",
+CTA_STEP      = [CTA(brand="Kickbacks CLI",
                      tagline="see everything you're earning — CLI + menu bar app.",
                      command="brew install --cask gabeperez/kickback/kickbacks-bar",
                      url="https://gabeperez.github.io/kickback-cli")]
