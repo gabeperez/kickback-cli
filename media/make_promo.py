@@ -57,9 +57,6 @@ FEATURES = [
     Card("day by day.",                  style="greenbold", hold=1.0), Run("daily",    hold=1.4),
     Card("week. month. year.",           style="greenbold", hold=1.0), Run("weekly",   hold=1.4),
     Card("every ad you've seen.",        style="greenbold", hold=1.0), Run("history",  hold=1.5, trim=11),
-    Card("tune it — no config spelunking.", style="greenbold", hold=1.0), Run("config", hold=1.5),
-    Card("one command to stay current.", style="greenbold", hold=1.0), Run("update --check", hold=1.6),
-    Card("nothing hidden.",              style="greenbold", hold=1.0), Run("about",    hold=1.6, trim=14),
     # NOTE: `watch` (runs forever) and `notify` (fires a real notification) don't
     # montage cleanly — they live in the slower demo + README instead.
 ]
