@@ -46,11 +46,12 @@ class CTA:
 # ===========================================================================
 #  ███  STORYBOARD — EDIT EVERYTHING IN THIS LIST  ███
 # ===========================================================================
-STORYBOARD = [
-    # --- opener hook ---
+OPENER = [
     Card("what you earn — live, in your terminal.", style="white", hold=1.6),
+]
 
-    # --- each function: a tagline (the value) → the command (the proof) ---
+# each function: a tagline (the value) → the command (the proof)
+FEATURES = [
     Card("everything, at a glance.",     style="greenbold", hold=1.0), Run("",         hold=1.8),
     Card("track every cent.",            style="greenbold", hold=1.0), Run("earnings", hold=1.6),
     Card("day by day.",                  style="greenbold", hold=1.0), Run("daily",    hold=1.4),
@@ -61,26 +62,35 @@ STORYBOARD = [
     Card("nothing hidden.",              style="greenbold", hold=1.0), Run("about",    hold=1.6, trim=14),
     # NOTE: `watch` (runs forever) and `notify` (fires a real notification) don't
     # montage cleanly — they live in the slower demo + README instead.
-
-    # --- the menu bar app (a click, not a command) ---
-    Card(["prefer a click?", "", "there's a menu bar app."],
-         style=["white", "dim", "greenbold"], hold=1.6),
-
-    # --- gratitude (soft, accurate trust signal) ---
-    Card("powered by Kickbacks.ai", style="dim", hold=1.4),
-
-    # --- call to action ---
-    CTA(brand="Kickbacks",
-        tagline="see everything you're earning — CLI + menu bar app.",
-        command="brew install --cask gabeperez/kickback/kickbacks-bar",
-        url="https://gabeperez.github.io/kickback-cli"),
 ]
+
+# the reveal — in the launch cut, the menu bar VIDEO plays right after this card.
+MENUBAR_TEASE = [Card("Oh, it's also on your menu bar.", style="greenbold", hold=1.8)]
+GRATITUDE     = [Card("powered by Kickbacks.ai", style="dim", hold=1.4)]
+CTA_STEP      = [CTA(brand="Kickbacks",
+                     tagline="see everything you're earning — CLI + menu bar app.",
+                     command="brew install --cask gabeperez/kickback/kickbacks-bar",
+                     url="https://gabeperez.github.io/kickback-cli")]
+
+# `python3 make_promo.py [promo|montage|outro]`
+#   promo   → standalone terminal hype cut (default): opener → features → tease → CTA
+#   montage → launch part 1: opener → features → "Oh, it's also on your menu bar."
+#             (the menu bar VIDEO is stitched in after this)
+#   outro   → launch part 2: gratitude → CTA  (plays after the menu bar video)
+import sys
+_MODE = sys.argv[1] if len(sys.argv) > 1 else "promo"
+_TARGETS = {
+    "promo":   (OPENER + FEATURES + MENUBAR_TEASE + GRATITUDE + CTA_STEP, "kickback-promo.cast"),
+    "montage": (OPENER + FEATURES + MENUBAR_TEASE,                        "kickback-launch-montage.cast"),
+    "outro":   (GRATITUDE + CTA_STEP,                                     "kickback-launch-outro.cast"),
+}
+STORYBOARD, _OUTNAME = _TARGETS[_MODE]
 # ===========================================================================
 #  end of storyboard — engine below, you shouldn't need to touch it
 # ===========================================================================
 
 
-OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kickback-promo.cast")
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), _OUTNAME)
 COLORS = {
     "dim":       "\x1b[2;37m",
     "white":     "\x1b[1;37m",
