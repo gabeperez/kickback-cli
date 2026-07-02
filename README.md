@@ -12,8 +12,8 @@ A small, local terminal companion for the [Kickbacks.ai](https://kickbacks.ai) V
 
 ## Requirements
 
-- **macOS** (reads the macOS Keychain + your editor's local store)
-- `python3` and `openssl` — both ship with macOS. **No pip packages, no build step.**
+- **macOS** (reads the macOS Keychain + your editor's local store). The **menu bar app** needs **macOS 13 (Ventura) or newer**; the CLI itself runs on older macOS too.
+- `python3` and `openssl`. `openssl` ships with macOS; `python3` comes with Apple's free **Command Line Tools** — on a fresh Mac the first `kickback` run (or the menu bar app) will prompt to install them (one click, ~a minute). **No pip packages, no build step.**
 - The [Kickbacks.ai extension](https://marketplace.visualstudio.com/items?itemName=Kickbacksai.kickbacks-ai) installed and signed in (in VS Code or Cursor)
 
 ## Install

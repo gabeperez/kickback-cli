@@ -11,8 +11,8 @@
 set -euo pipefail
 
 # ---- pinned release ------------------------------------------------------
-SCRIPT_URL="${KICKBACK_SCRIPT_URL:-https://raw.githubusercontent.com/gabeperez/kickback-cli/v0.1.5/kickback}"
-SHA256_EXPECTED="2cfa3774cba918e3611e6cb01dd8ec9e85210006877261cf4666caface22c800"
+SCRIPT_URL="${KICKBACK_SCRIPT_URL:-https://raw.githubusercontent.com/gabeperez/kickback-cli/v0.1.6/kickback}"
+SHA256_EXPECTED="92ebda30a8c6b4b746231e4dfb266b60493d59938d066ec60947d5a370bc687e"
 # --------------------------------------------------------------------------
 
 BIN="${KICKBACK_BIN:-$HOME/.local/bin}"
@@ -44,12 +44,21 @@ mkdir -p "$BIN"
 install -m 0755 "$TMP/kickback" "$BIN/kickback"
 echo "✓ installed → $BIN/kickback"
 
+ADDED_PATH=0
 case ":$PATH:" in
-  *":$BIN:"*) ;;
-  *) echo "  note: add $BIN to your PATH:  echo 'export PATH=\"$BIN:\$PATH\"' >> ~/.zshrc" ;;
+  *":$BIN:"*) ;;                                  # already on PATH
+  *)
+    case "${SHELL:-}" in */bash) RC="$HOME/.bashrc" ;; *) RC="$HOME/.zshrc" ;; esac  # macOS default: zsh
+    if ! grep -qsF "$BIN" "$RC" 2>/dev/null; then
+      printf '\n# added by kickback installer\nexport PATH="%s:$PATH"\n' "$BIN" >> "$RC"
+      echo "✓ added $BIN to your PATH in $RC"
+    fi
+    export PATH="$BIN:$PATH"; ADDED_PATH=1
+    ;;
 esac
 
 # 4) safe-default config + first-run summary
 "$BIN/kickback" init || true
 echo
 echo "Done. Try:  kickback   ·   kickback about   ·   kickback doctor"
+[ "$ADDED_PATH" = 1 ] && echo "  (open a new terminal first, or run:  export PATH=\"$BIN:\$PATH\")"

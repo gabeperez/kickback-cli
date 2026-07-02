@@ -20,7 +20,7 @@ if present, otherwise falls back to the system `openssl` (always on macOS).
 import json, os, re, sys, time, sqlite3, subprocess, hashlib, base64, shutil, urllib.request, urllib.error, urllib.parse
 
 APP = "kickback"
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 CONFIG_DIR = os.path.expanduser(os.path.join("~", ".config", APP))
 CFG_PATH = os.path.join(CONFIG_DIR, "config.json")
 SELF = os.path.abspath(__file__)
@@ -68,7 +68,7 @@ def positional(i, default=None):
 def opt(name, default=None):
     """Value of a `--name VALUE` or `--name=VALUE` option, else default."""
     for i, a in enumerate(ARGS):
-        if a == name and i+1 < len(ARGS): return ARGS[i+1]
+        if a == name and i+1 < len(ARGS) and not ARGS[i+1].startswith("-"): return ARGS[i+1]
         if a.startswith(name+"="): return a.split("=", 1)[1]
     return default
 NO_COLOR = flag("--plain") or not sys.stdout.isatty() or os.environ.get("NO_COLOR")
@@ -96,13 +96,31 @@ def _deep_merge(base, over):
             out[k] = v
     return out
 
+def _coerce_cfg(co):
+    """Normalize types so a hand-edited config can't crash the tool. The config is
+    'editable by hand' per the docs, so we tolerate wrong-typed values."""
+    if not isinstance(co.get("features"), dict):
+        co["features"] = dict(DEFAULT_CONFIG["features"])
+    try:
+        co["notify_hour"] = int(co.get("notify_hour", 21))
+    except (ValueError, TypeError):
+        co["notify_hour"] = DEFAULT_CONFIG["notify_hour"]
+    if not (0 <= co["notify_hour"] <= 23):
+        co["notify_hour"] = DEFAULT_CONFIG["notify_hour"]
+    for k in ("backend_base_url", "vibe_ads_dir", "claude_settings"):
+        if not isinstance(co.get(k), str):
+            co[k] = DEFAULT_CONFIG[k]
+    if not isinstance(co.get("endpoints"), dict):
+        co["endpoints"] = dict(DEFAULT_CONFIG["endpoints"])
+    return co
+
 _CFG = None
 def cfg():
     global _CFG
     if _CFG is not None: return _CFG
     if os.path.exists(CFG_PATH):
         try:
-            _CFG = _deep_merge(DEFAULT_CONFIG, json.load(open(CFG_PATH)))
+            _CFG = _coerce_cfg(_deep_merge(DEFAULT_CONFIG, json.load(open(CFG_PATH))))
         except Exception:
             _CFG = dict(DEFAULT_CONFIG)
     else:
@@ -392,7 +410,7 @@ def update_daily(e):
     with open(path_daily(), "w") as f: json.dump(d, f)
 def day_earned(rec): return max(rec.get("today_max", 0), rec.get("life_max", 0) - rec.get("life_min", 0))
 
-def log_ad(quiet=False):
+def log_ad(quiet=False, prefetched=None):
     if _demo_on(): return                      # never write logs in demo mode
     ad = read_json(path_ad()) or {}; title = ad.get("adText")
     if not title:
@@ -400,8 +418,11 @@ def log_ad(quiet=False):
         return
     rows = read_hist()
     rec = {"ts": int(time.time()*1000), "title": title, "url": ad.get("clickUrl") or ""}
-    state, _ = last_session_state()
-    e, p, _err, _src = fetch_live(state.get("ccVersion"))
+    if prefetched is not None:                  # reuse the caller's fetch (no 2nd keychain/network hit)
+        e, p = prefetched
+    else:
+        state, _ = last_session_state()
+        e, p, _err, _src = fetch_live(state.get("ccVersion"))
     if e: rec["micros"] = e.get("lifetime_micros")
     if p:
         for a in (p.get("ads") or []):
@@ -419,7 +440,8 @@ def log_ad(quiet=False):
     if not quiet: print("logged:", title[:55], "·", usd(rec.get("micros")) if rec.get("micros") is not None else "no $")
 
 def attribute(rows):
-    per = {}; pts = [(r["ts"], r["micros"], r.get("title")) for r in rows if isinstance(r.get("micros"), (int, float))]
+    per = {}; pts = [(r["ts"], r["micros"], r.get("title")) for r in rows
+                     if isinstance(r.get("micros"), (int, float)) and isinstance(r.get("ts"), (int, float))]
     for i in range(len(pts)-1):
         d = pts[i+1][1] - pts[i][1]
         if d > 0: per[pts[i][2]] = per.get(pts[i][2], 0) + d
@@ -438,8 +460,10 @@ def show_history():
     rows = read_hist()
     per, _ = attribute(rows); agg = {}
     for r in rows:
-        t = r.get("title", "?"); a = agg.setdefault(t, {"count": 0, "first": r["ts"], "last": r["ts"], "weight": r.get("weight")})
-        a["count"] += 1; a["first"] = min(a["first"], r["ts"]); a["last"] = max(a["last"], r["ts"])
+        ts = r.get("ts")
+        if not isinstance(ts, (int, float)): continue      # skip malformed/hand-corrupted rows
+        t = r.get("title", "?"); a = agg.setdefault(t, {"count": 0, "first": ts, "last": ts, "weight": r.get("weight")})
+        a["count"] += 1; a["first"] = min(a["first"], ts); a["last"] = max(a["last"], ts)
     ranked = sorted(agg.items(), key=lambda kv: per.get(kv[0], 0) or kv[1]["count"], reverse=True)
     if flag("--json"):
         return emit({
@@ -476,8 +500,10 @@ def _earnings_buckets(period):
     """{period_key: micros} rolled up from daily.json — canonical micros, never billed.
     period='daily' keeps raw YYYY-MM-DD keys; coarser grains group by _PERIOD_FMT."""
     d = _demo_daily() if _demo_on() else (read_json(path_daily()) or {})
+    if not isinstance(d, dict): return {}                  # tolerate a hand-corrupted daily.json
     fmt = _PERIOD_FMT[period]; buckets = {}
     for day, rec in d.items():
+        if not isinstance(rec, dict): continue
         if fmt is None:
             pk = day
         else:
@@ -553,7 +579,7 @@ def show_earnings():
             velocity = {"per_hour_micros": int(per_h), "per_day_micros": int(per_h*24), "span_hours": round(span_h, 2)}
     per, _ = attribute(rows); rota = sum(1 for r in rows if r.get("title")); tot = sum(per.values())
     eff_rate = int(tot/rota) if (tot > 0 and rota > 0) else None
-    attributed_pct = round(tot/max(1, e.get("lifetime_micros", 0))*100, 1) if (e and tot > 0) else None
+    attributed_pct = round(tot/max(1, e.get("lifetime_micros") or 0)*100, 1) if (e and tot > 0) else None
     if flag("--json"):
         return emit({
             "live": bool(e), "error": None if e else (err or "unavailable"),
@@ -701,25 +727,28 @@ def config_edit():
 def config_get(key):
     co = cfg()
     if key and key in co:
-        print(json.dumps(co[key]) if not flag("--json") else json.dumps({key: co[key]}))
-    else:
-        print(f"unknown key '{key or ''}'."); print(DIM("  see all:  ")+"kickback config --json")
+        if flag("--json"): return emit({key: co[key]})
+        print(json.dumps(co[key])); return
+    if flag("--json"): return emit({"key": key, "ok": False, "error": "unknown key"})
+    print(f"unknown key '{key or ''}'."); print(DIM("  see all:  ")+"kickback config --json")
 
 def config_set(key, value):
+    def _err(msg):
+        if flag("--json"): return emit({"key": key, "ok": False, "error": msg, "editable": list(_EDITABLE)})
+        print(RED(msg) if key else "usage:  kickback config set <key> <value>")
+        print(DIM("  editable keys:  ")+", ".join(_EDITABLE))
     if not key or value is None:
-        print("usage:  kickback config set <key> <value>")
-        print(DIM("  editable keys:  ")+", ".join(_EDITABLE)); return
+        return _err("usage: config set <key> <value>")
     if key in ("network", "sampler", "notifications", "token_refresh", "autorewire", "update_check"):
+        if flag("--json"): return emit({"key": key, "ok": False, "error": "feature — use enable/disable"})
         print(f"'{key}' is a feature — toggle it:  "+f"kickback enable {key}"+DIM("  /  ")+f"kickback disable {key}"); return
     if key not in _EDITABLE:
-        print(f"'{key}' isn't a settable scalar.")
-        print(DIM("  editable keys:  ")+", ".join(_EDITABLE))
-        print(DIM("  anything else:  ")+"kickback config edit"); return
+        return _err(f"'{key}' isn't a settable scalar")
     co = cfg()
     if key == "notify_hour":
         try: v = int(value)
-        except ValueError: print(RED("notify_hour must be an integer 0–23.")); return
-        if not (0 <= v <= 23): print(RED("notify_hour must be between 0 and 23.")); return
+        except (ValueError, TypeError): return _err("notify_hour must be an integer 0–23")
+        if not (0 <= v <= 23): return _err("notify_hour must be between 0 and 23")
         co[key] = v
     else:
         co[key] = value
@@ -737,10 +766,13 @@ def set_feature(name, on):
         co["network_enabled"] = on; save_cfg(co)
     else:
         co["features"][name] = on; save_cfg(co)
-        if name == "sampler":
-            install_sampler() if on else uninstall_sampler()
-        elif name == "notifications":
-            install_notify() if on else uninstall_notify()
+        import io, contextlib
+        cm = contextlib.redirect_stdout(io.StringIO()) if flag("--json") else contextlib.nullcontext()
+        with cm:                                 # keep launchd-installer text out of the JSON stream
+            if name == "sampler":
+                install_sampler() if on else uninstall_sampler()
+            elif name == "notifications":
+                install_notify() if on else uninstall_notify()
     if flag("--json"): return emit({"feature": name, "enabled": on, "ok": True})
     if name == "network":
         print(f"network {'enabled' if on else 'disabled'}."); return
@@ -1080,7 +1112,8 @@ def notify():
     print(sub, "·", msg)
 
 def watch():
-    secs = int(positional(1, "5") or 5)
+    try: secs = max(1, int(positional(1, "5") or 5))    # tolerate `watch abc` / `watch 0`
+    except (ValueError, TypeError): secs = 5
     try:
         while True:
             d = gather(); e, p, err, src = fetch_live(d["cc_version"])
@@ -1297,8 +1330,8 @@ def main():
     # default: status
     d = gather()
     e, p, err, src = (None, None, "offline", None) if flag("--offline") else fetch_live(d["cc_version"])
-    if not flag("--no-log"):
-        try: log_ad(quiet=True)
+    if not flag("--no-log") and not flag("--offline"):     # --offline: no keychain, no network, no writes
+        try: log_ad(quiet=True, prefetched=(e, p))          # reuse the fetch above — don't hit the backend twice
         except Exception: pass
     if flag("--json"):
         d.pop("_vc", None)
@@ -1316,4 +1349,14 @@ def main():
         except Exception: pass
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except BrokenPipeError:
+        sys.exit(0)                                        # e.g. `kickback history | head`
+    except Exception as ex:
+        # "degrades gracefully — never crashes": no raw traceback for end users.
+        print(f"kickback: unexpected error ({type(ex).__name__}: {ex})", file=sys.stderr)
+        print("  try `kickback doctor`, or report it at github.com/gabeperez/kickback-cli", file=sys.stderr)
+        sys.exit(1)
