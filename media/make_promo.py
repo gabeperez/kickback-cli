@@ -48,27 +48,31 @@ class CTA:
 # ===========================================================================
 STORYBOARD = [
     # --- opener hook ---
-    Card("what you earn — in your terminal.", style="white", hold=1.5),
+    Card("what you earn — live, in your terminal.", style="white", hold=1.6),
 
     # --- each function: a tagline (the value) → the command (the proof) ---
     Card("everything, at a glance.",     style="greenbold", hold=1.0), Run("",         hold=1.8),
-    Card("track every cent.",            style="greenbold", hold=1.0), Run("earnings", hold=1.5),
+    Card("track every cent.",            style="greenbold", hold=1.0), Run("earnings", hold=1.6),
     Card("day by day.",                  style="greenbold", hold=1.0), Run("daily",    hold=1.4),
+    Card("week. month. year.",           style="greenbold", hold=1.0), Run("weekly",   hold=1.4),
     Card("every ad you've seen.",        style="greenbold", hold=1.0), Run("history",  hold=1.5, trim=11),
-    Card("always signed in.",            style="greenbold", hold=1.0), Run("auth",     hold=1.3),
-    Card("you're in control.",           style="greenbold", hold=1.0), Run("config",   hold=1.4),
-    Card("one-command health check.",    style="greenbold", hold=1.0), Run("doctor",   hold=1.5, trim=12),
+    Card("tune it — no config spelunking.", style="greenbold", hold=1.0), Run("config", hold=1.5),
+    Card("one command to stay current.", style="greenbold", hold=1.0), Run("update --check", hold=1.6),
     Card("nothing hidden.",              style="greenbold", hold=1.0), Run("about",    hold=1.6, trim=14),
     # NOTE: `watch` (runs forever) and `notify` (fires a real notification) don't
     # montage cleanly — they live in the slower demo + README instead.
+
+    # --- the menu bar app (a click, not a command) ---
+    Card(["prefer a click?", "", "there's a menu bar app."],
+         style=["white", "dim", "greenbold"], hold=1.6),
 
     # --- gratitude (soft, accurate trust signal) ---
     Card("powered by Kickbacks.ai", style="dim", hold=1.4),
 
     # --- call to action ---
-    CTA(brand="Kickbacks CLI",
-        tagline="see everything you're earning.",
-        command="brew install gabeperez/kickback/kickback",
+    CTA(brand="Kickbacks",
+        tagline="see everything you're earning — CLI + menu bar app.",
+        command="brew install --cask gabeperez/kickback/kickbacks-bar",
         url="https://gabeperez.github.io/kickback-cli"),
 ]
 # ===========================================================================
