@@ -1,32 +1,30 @@
 #!/usr/bin/env python3
 """
-Epic-but-upbeat hype track for the Kickbacks CLI launch video — synthesized from
-scratch (no samples). Cinematic "trailer" flavour (Michael Bay / Zimmer-ish):
-huge BRAAM brass, taiko drums, a driving staccato string/brass ostinato, power
-chords, risers + impacts, all over a four-on-the-floor pulse so it stays upbeat.
-Convolution reverb (synth impulse) gives it size. A minor: Am–F–C–G.
+Upbeat, warm electronic track for the Kickbacks CLI launch video — synthesized
+from scratch (no samples). Clean "uplifting house" feel: soft sine/triangle
+tones (no harsh saws), four-on-the-floor kick, sub bass, a warm additive pad,
+a flowing arpeggio, light hats + clap, sidechain pump, and a gentle slap delay.
+C major, I–V–vi–IV (C–G–Am–F). 122 BPM.
 
   <venv-python> media/make_track.py <out.wav> [duration] [bpm]
 
-Impacts are placed on the beat grid AND at cinematic "hit points" (the menu-bar
-reveal ~23s and the CTA ~26s) so it feels scored to the cut. Needs numpy.
+Deliberately soft/consonant so it reads as pleasant even without harsh synths.
+Needs numpy.
 """
 import sys, wave
 import numpy as np
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else "track.wav"
 DUR = float(sys.argv[2]) if len(sys.argv) > 2 else 31.633
-BPM = float(sys.argv[3]) if len(sys.argv) > 3 else 150.0
+BPM = float(sys.argv[3]) if len(sys.argv) > 3 else 122.0
 
 SR = 44100
-np.random.seed(11)
+np.random.seed(3)
 beat = 60.0 / BPM
 bar  = 4 * beat
-N = int(DUR * SR) + int(2.5 * SR)          # tail room for reverb/fades
-drums = np.zeros(N); brass = np.zeros(N); melody = np.zeros(N); low = np.zeros(N)
-
-# cinematic hit points (seconds) — synced to the cut: menu-bar reveal, CTA
-HITS = [0.0, 23.0, 26.0]
+N = int(DUR * SR) + int(2.0 * SR)
+kickb = np.zeros(N); perc = np.zeros(N); bassb = np.zeros(N)
+padb  = np.zeros(N); arpb = np.zeros(N); leadb = np.zeros(N)
 
 def place(buf, t, sig, g=1.0):
     s = int(t * SR)
@@ -34,156 +32,121 @@ def place(buf, t, sig, g=1.0):
     e = min(s + len(sig), len(buf)); buf[s:e] += sig[:e - s] * g
 
 def tt(dur): return np.arange(int(dur * SR)) / SR
+def sine(f, x): return np.sin(2 * np.pi * f * x)
+def tri(f, x):  return (2 / np.pi) * np.arcsin(np.sin(2 * np.pi * f * x))
 
-def saw(f, x, detune=0.0):
-    def s(g): u = g * x; return 2 * (u - np.floor(0.5 + u))
-    return s(f) if not detune else (s(f) + s(f * (1 + detune)) + s(f * (1 - detune))) / 3
-
-# --- big brass BRAAM: stacked octaves+fifth, swell attack, vibrato ---------
-def braam(root, dur=1.6, amp=0.5):
+def kick(dur=0.32, amp=0.92):
     x = tt(dur)
-    vib = 1 + 0.006 * np.sin(2 * np.pi * 5.5 * x)
-    voices = [root, root, root * 1.5, root * 2, root * 2]
-    sig = sum(saw(f * vib, x, detune=0.01) for f in voices) / len(voices)
-    env = (1 - np.exp(-x * 14)) * np.exp(-x * 1.1)      # swell in, long body
-    # opening lowpass (one-pole) so the attack "blooms"
-    a = np.clip(0.02 + 0.5 * (1 - np.exp(-x * 6)), 0, 0.6)
-    y = np.zeros_like(sig); p = 0.0
-    for i in range(len(sig)):
-        p += a[i] * (sig[i] - p); y[i] = p
-    return y * env * amp
+    pitch = 115 * np.exp(-x * 32) + 47
+    body = np.sin(2 * np.pi * np.cumsum(pitch) / SR) * np.exp(-x * 7)
+    click = np.exp(-x * 300) * 0.25
+    return (body + click) * amp
 
-# --- shorter brass stab (accents) -----------------------------------------
-def stab(f, dur=0.28, amp=0.32):
-    x = tt(dur)
-    sig = (saw(f, x, 0.01) + saw(f * 1.5, x, 0.01) + saw(f * 2, x, 0.01)) / 3
-    env = (1 - np.exp(-x * 60)) * np.exp(-x * 6)
-    return sig * env * amp
-
-# --- taiko / epic tom: boomy pitched membrane + body noise -----------------
-def taiko(freq=95, dur=0.55, amp=0.85):
-    x = tt(dur)
-    pitch = freq * (1 + 1.2 * np.exp(-x * 22))
-    body = np.sin(2 * np.pi * np.cumsum(pitch) / SR) * np.exp(-x * 5.5)
-    knock = (np.random.rand(len(x)) * 2 - 1) * np.exp(-x * 40) * 0.25
-    return (body + knock) * amp
-
-def kick(dur=0.26, amp=0.8):
-    x = tt(dur)
-    pitch = 130 * np.exp(-x * 34) + 48
-    return (np.sin(2 * np.pi * np.cumsum(pitch) / SR) * np.exp(-x * 8)) * amp
-
-def snare(dur=0.25, amp=0.5):
+def clap(dur=0.18, amp=0.28):
     x = tt(dur); noise = np.random.rand(len(x)) * 2 - 1
-    tone = np.sin(2 * np.pi * 180 * x) * 0.3
-    return (noise + tone) * np.exp(-x * 16) * amp
+    # soften: lowpass the noise so it's a warm clap, not a hiss
+    p = 0.0; y = np.zeros_like(noise)
+    for i in range(len(noise)): p += 0.5 * (noise[i] - p); y[i] = p
+    return y * np.exp(-x * 20) * amp
 
-def hat(dur=0.04, amp=0.16):
+def hat(dur=0.028, amp=0.035):
     x = tt(dur); noise = np.diff(np.random.rand(int(dur * SR)) * 2 - 1, prepend=0.0)
-    return noise * np.exp(-x * 80) * amp
+    return noise * np.exp(-x * 150) * amp
 
-def power_bass(root, dur, amp=0.24):
+def sub(f, dur, amp=0.24):
     x = tt(dur)
-    sig = (saw(root, x, 0.004) + 0.6 * saw(root * 1.5, x, 0.004)) / 1.6
-    env = np.minimum(1, x * 120) * (0.7 + 0.3 * np.exp(-x * 2))
+    sig = sine(f, x) + 0.25 * sine(2 * f, x)          # sub + gentle 2nd for presence
+    env = np.minimum(1, x * 90) * (0.85 + 0.15 * np.exp(-x * 3))
     return sig * env * amp
 
-def ostinato(f, dur, amp=0.12):
-    x = tt(dur)
-    sig = saw(f, x, 0.008)
-    env = (1 - np.exp(-x * 200)) * np.exp(-x * 11)       # staccato pluck
+def pad(freqs, dur, amp=0.10):
+    x = tt(dur); sig = np.zeros(len(x))
+    for f in freqs:                                    # additive, warm
+        sig += sine(f, x) + 0.5 * sine(2 * f, x) + 0.25 * sine(3 * f, x)
+    sig /= (len(freqs) * 1.75)
+    env = (1 - np.exp(-x * 6)) * np.exp(-x * 0.5)      # slow swell, gentle decay
     return sig * env * amp
 
-def impact(dur=1.6, amp=0.7):
-    x = tt(dur); noise = np.random.rand(len(x)) * 2 - 1
-    crash = noise * np.exp(-x * 3.5)
-    boom = np.sin(2 * np.pi * (60 * np.exp(-x * 6) + 35) * x) * np.exp(-x * 4)
-    return (crash * 0.6 + boom) * amp
+def pluck(f, dur, amp=0.13):
+    x = tt(dur)
+    sig = tri(f, x) + 0.3 * sine(2 * f, x)
+    env = np.exp(-x * 7) * (1 - np.exp(-x * 300))
+    return sig * env * amp
 
-def riser(dur, amp=0.4):
-    x = tt(dur); noise = np.random.rand(len(x)) * 2 - 1
-    swell = noise * (x / dur) ** 2.2
-    pitch = np.sin(2 * np.pi * (200 + 1200 * (x / dur) ** 2) * x) * (x / dur)
-    return (swell * 0.7 + pitch * 0.3) * amp
+def lead(f, dur, amp=0.16):
+    x = tt(dur)
+    vib = 1 + 0.004 * np.sin(2 * np.pi * 5 * x)
+    sig = tri(f * vib, x) + 0.4 * sine(2 * f, x)
+    env = (1 - np.exp(-x * 40)) * np.exp(-x * 2.2)
+    return sig * env * amp
 
-# A minor progression: chord tones + bass root (Hz)
-A,Bf,B,C,D,E,F,G = 220.,233.08,246.94,261.63,293.66,329.63,174.61,196.0
-PROG = [([A,C,E],110.0), ([F,A,C],87.31), ([C,E,G],130.81), ([G,B,D],98.0)]
+# C major: chord tones + bass root (Hz).  C–G–Am–F  (I–V–vi–IV)
+C,D,E,F,G,A,B = 261.63,293.66,329.63,349.23,392.0,440.0,493.88
+PROG = [([C,E,G], 130.81/2),   # C  (root ~65)
+        ([G,B,D], 98.0/2),     # G
+        ([A,C,E], 110.0/2),    # Am
+        ([F,A,C], 87.31/2)]    # F
+CHORDS_PER = 2                 # bars per chord
 
 nbars = int(DUR / bar) + 1
 for b in range(nbars):
-    chord, root = PROG[b % 4]
-    phrase_start = (b % 4 == 0)
-    build = b < 1
+    chord, root = PROG[(b // CHORDS_PER) % 4]
+    intro = b < 2                                      # 2-bar intro: pad + arp only
+    if b % CHORDS_PER == 0:                             # sustain a pad across each chord
+        place(padb, b * bar, pad(chord, bar * CHORDS_PER))
     for bt in range(4):
         t0 = b * bar + bt * beat
-        # --- drums: four-on-floor kick + taiko weight on 1&3 + snare on 3 ---
-        if not build:
-            place(drums, t0, kick())
-            if bt in (0, 2): place(drums, t0, taiko())
-            if bt == 2:      place(drums, t0, snare())
-        place(drums, t0,            hat(amp=0.10))
-        place(drums, t0 + beat / 2, hat(amp=0.16))
-        # --- power bass on 8ths ---
-        if not build:
-            place(low, t0,            power_bass(root, beat / 2 * 0.95))
-            place(low, t0 + beat / 2, power_bass(root, beat / 2 * 0.95))
-        # --- driving ostinato: 16ths up/down the chord (octave up) ---
-        arp = [chord[i % 3] * 2 for i in range(4)]
-        if bt % 2: arp = arp[::-1]
-        for s in range(4):
-            place(melody, t0 + s * beat / 4, ostinato(arp[s], beat / 4 * 0.95,
-                                                       amp=0.07 if build else 0.12))
-    # --- brass: BRAAM at each 4-bar phrase, stabs mid-phrase ---
-    if phrase_start and not build:
-        place(brass, b * bar, braam(root, dur=min(bar * 2, 3.0)), g=1.0)
-    elif not build:
-        place(brass, b * bar, stab(root * 2, 0.3))
-        place(brass, b * bar + 2 * beat, stab(chord[1] * 2, 0.3))
-    if build:
-        place(drums, b * bar, riser(bar))
-        place(brass, b * bar, braam(root, dur=bar * 1.5, amp=0.4))
+        if not intro:
+            place(kickb, t0, kick())
+            if bt in (1, 3): place(perc, t0, clap())
+        place(perc, t0 + beat / 2, hat())              # soft offbeat hat
+        if not intro:
+            place(bassb, t0,            sub(root, beat / 2 * 0.95))
+            place(bassb, t0 + beat / 2, sub(root, beat / 2 * 0.95))
+        # flowing arpeggio (8ths): root, 3rd, 5th, octave, 5th, 3rd ...
+        seq = [chord[0], chord[1], chord[2], chord[0] * 2, chord[2], chord[1], chord[0] * 2, chord[2]]
+        for e8 in range(2):
+            idx = (bt * 2 + e8) % len(seq)
+            place(arpb, t0 + e8 * beat / 2, pluck(seq[idx], beat / 2 * 0.9,
+                                                  amp=0.09 if intro else 0.13))
+    # simple lead motif in the second half (top-line, octave up on chord tones)
+    if b >= 8 and b % 2 == 0:
+        motif = [chord[2] * 2, chord[0] * 2, chord[1] * 2, chord[2] * 2]
+        for i, f in enumerate(motif):
+            place(leadb, b * bar + i * beat, lead(f, beat * 0.9))
 
-# cinematic impacts + braam swells at the hit points (menu-bar reveal, CTA)
-for h in HITS:
-    place(drums, h, impact())
-    root = PROG[int(h / bar) % 4][1]
-    place(brass, max(0, h - 0.02), braam(root, dur=2.2, amp=0.42))
-# a riser leading into the last two hit points
-for h in HITS[1:]:
-    place(drums, h - bar, riser(bar, amp=0.5))
-
-# --- sidechain pump on the musical busses (keeps the pulse punchy) ---------
-sc = np.ones(N); L = int(0.30 * SR); ramp = 0.4 + 0.6 * (np.arange(L) / L)
-for b in range(1, nbars):
+# sidechain pump on pad + bass + arp (classic house groove)
+sc = np.ones(N); L = int(0.28 * SR); ramp = 0.45 + 0.55 * (np.arange(L) / L)
+for b in range(2, nbars):
     for bt in range(4):
         s = int((b * bar + bt * beat) * SR)
         sc[s:s + L] = np.minimum(sc[s:s + L], ramp[:len(sc[s:s + L])])
-melody *= sc; brass *= (0.6 + 0.4 * sc); low *= sc
+padb *= (0.55 + 0.45 * sc); bassb *= sc; arpb *= (0.7 + 0.3 * sc)
 
-dry = drums + brass + melody + low
+# gentle slap delay on arp + lead for space (feed-forward taps, no mud)
+def slap(buf, times_gains):
+    out = buf.copy()
+    for dt, g in times_gains:
+        d = int(dt * SR); out[d:] += buf[:N - d] * g
+    return out
+arpb  = slap(arpb,  [(beat * 0.75, 0.28), (beat * 1.5, 0.12)])
+leadb = slap(leadb, [(beat * 0.75, 0.30), (beat * 1.5, 0.14)])
 
-# --- convolution reverb (synth IR: dark exponential-decay noise) -----------
-ir_len = int(1.6 * SR); xi = np.arange(ir_len) / SR
-ir = (np.random.rand(ir_len) * 2 - 1) * np.exp(-xi * 4.0)
-# darken the tail (one-pole lowpass)
-lp = np.zeros_like(ir); p = 0.0
-for i in range(ir_len): p += 0.25 * (ir[i] - p); lp[i] = p
-ir = lp / (np.max(np.abs(lp)) + 1e-9)
-nfft = 1 << (len(dry) + ir_len - 1).bit_length()
-wet = np.fft.irfft(np.fft.rfft(dry, nfft) * np.fft.rfft(ir, nfft), nfft)[:len(dry)]
-wet /= (np.max(np.abs(wet)) + 1e-9)
-mix = 0.78 * dry + 0.34 * wet * np.max(np.abs(dry))
-
-# --- master: soft-clip, normalize, fades ----------------------------------
-mix = np.tanh(mix * 1.15)
-mix /= (np.max(np.abs(mix)) + 1e-9); mix *= 0.95
-fi = int(0.03 * SR); mix[:fi] *= np.linspace(0, 1, fi)
-end = int(DUR * SR); fo = int(2.0 * SR)
+mix = kickb + perc + bassb + padb + arpb + leadb
+# master: warm it with a gentle 2-pole lowpass (~4 kHz), then soft-clip/normalize
+def lp1(sig, a):
+    y = np.empty_like(sig); p = 0.0
+    for i in range(len(sig)): p += a * (sig[i] - p); y[i] = p
+    return y
+mix = lp1(mix, 0.62)
+mix = np.tanh(mix * 1.08)
+mix /= (np.max(np.abs(mix)) + 1e-9); mix *= 0.94
+fi = int(0.05 * SR); mix[:fi] *= np.linspace(0, 1, fi)
+end = int(DUR * SR); fo = int(1.8 * SR)
 mix[end - fo:end] *= np.linspace(1, 0, fo); mix = mix[:end]
 
 pcm = (np.clip(mix, -1, 1) * 32767).astype("<i2")
 with wave.open(OUT, "w") as w:
     w.setnchannels(1); w.setsampwidth(2); w.setframerate(SR)
     w.writeframes(pcm.tobytes())
-print(f"wrote {OUT}  ({len(pcm)/SR:.1f}s @ {BPM:.0f} BPM, epic)")
+print(f"wrote {OUT}  ({len(pcm)/SR:.1f}s @ {BPM:.0f} BPM, warm/house)")
