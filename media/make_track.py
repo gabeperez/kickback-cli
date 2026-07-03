@@ -16,7 +16,7 @@ import numpy as np
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else "track.wav"
 DUR = float(sys.argv[2]) if len(sys.argv) > 2 else 31.633
-BPM = float(sys.argv[3]) if len(sys.argv) > 3 else 128.0
+BPM = float(sys.argv[3]) if len(sys.argv) > 3 else 132.0
 
 SR = 44100
 np.random.seed(5)
@@ -35,11 +35,12 @@ def tt(dur): return np.arange(int(dur * SR)) / SR
 def sine(f, x): return np.sin(2 * np.pi * f * x)
 def tri(f, x):  return (2 / np.pi) * np.arcsin(np.sin(2 * np.pi * f * x))
 
-def kick(dur=0.30, amp=0.95):
+def kick(dur=0.34, amp=1.05):
     x = tt(dur)
-    pitch = 120 * np.exp(-x * 33) + 48
-    body = np.sin(2 * np.pi * np.cumsum(pitch) / SR) * np.exp(-x * 7.5)
-    return (body + np.exp(-x * 300) * 0.25) * amp
+    pitch = 135 * np.exp(-x * 30) + 50                 # deeper, longer thump
+    body = np.sin(2 * np.pi * np.cumsum(pitch) / SR) * np.exp(-x * 6.5)
+    sub  = np.sin(2 * np.pi * 45 * x) * np.exp(-x * 9) * 0.5
+    return (body + sub + np.exp(-x * 300) * 0.28) * amp
 
 def clap(dur=0.17, amp=0.30):
     x = tt(dur); noise = np.random.rand(len(x)) * 2 - 1
@@ -51,10 +52,12 @@ def hat(dur=0.03, amp=0.05):
     x = tt(dur); noise = np.diff(np.random.rand(int(dur * SR)) * 2 - 1, prepend=0.0)
     return noise * np.exp(-x * 130) * amp
 
-def bass(f, dur, amp=0.24):
+def bass(f, dur, amp=0.30):
     x = tt(dur)
-    sig = sine(f, x) + 0.28 * sine(2 * f, x) + 0.22 * tri(f, x)   # warm + a little drive
-    env = np.minimum(1, x * 110) * (0.8 + 0.2 * np.exp(-x * 2.5))
+    # big low end: strong sub octave + fundamental + a little drive on top
+    sig = 0.9 * sine(f / 2, x) + sine(f, x) + 0.30 * sine(2 * f, x) + 0.22 * tri(f, x)
+    sig /= 2.4
+    env = np.minimum(1, x * 110) * (0.82 + 0.18 * np.exp(-x * 2.5))
     return sig * env * amp
 
 def pad(freqs, dur, amp=0.09):
@@ -83,7 +86,7 @@ def riser(dur, amp=0.32):
 A,B,C,D,E,F,G = 220.,246.94,261.63,293.66,329.63,174.61,196.0
 PROG = [([A,C,E], 110.0/2), ([F,A,C], 174.61/4), ([C,E,G], 130.81/2), ([G,B,D], 98.0)]
 
-DROP = 2                          # bar where the beat drops
+DROP = 1                          # bar where the beat drops (earlier = more immediate)
 nbars = int(DUR / bar) + 1
 for b in range(nbars):
     chord, root = PROG[b % 4]
@@ -111,11 +114,16 @@ for b in range(nbars):
         for i, f in enumerate(motif):
             place(leadb, b * bar + i * beat, lead(f, beat * 0.9))
 
-# risers into the drop and into the final section
-place(fx, (DROP - 1) * bar, riser(bar))
-place(fx, DROP * bar, kick(0.5, 0.6))            # downbeat impact on the drop
+# riser into the drop, then a big impact + sub-boom on the downbeat
+place(fx, max(0.0, (DROP - 1) * bar), riser(bar))
+def subboom(dur=0.9, amp=0.7):
+    x = tt(dur)
+    return np.sin(2 * np.pi * (55 * np.exp(-x * 5) + 38) * x) * np.exp(-x * 3.2) * amp
+place(fx, DROP * bar, kick(0.5, 0.7))            # downbeat impact on the drop
+place(fx, DROP * bar, subboom())                 # booming low-end drop hit
 mid = (nbars // 2)
-place(fx, (mid - 1) * bar, riser(bar, 0.28))
+place(fx, (mid - 1) * bar, riser(bar, 0.30))
+place(fx, mid * bar, subboom(0.7, 0.5))          # second-half re-drop weight
 
 # sidechain pump on pad + bass + arp (the groove)
 sc = np.ones(N); L = int(0.26 * SR); ramp = 0.42 + 0.58 * (np.arange(L) / L)
